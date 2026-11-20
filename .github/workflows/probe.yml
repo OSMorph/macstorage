@@ -1,0 +1,124 @@
+name: M0 probe
+
+on:
+  push:
+    branches: [main]
+    tags: ["probe-v*"]
+    paths:
+      - "spikes/m0-probe/**"
+      - "scripts/**"
+      - "signing/**"
+      - ".github/workflows/probe.yml"
+  pull_request:
+    paths:
+      - "spikes/m0-probe/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PACKAGE: spikes/m0-probe
+  APP_NAME: MacStorageProbe
+  BUNDLE_ID: io.github.osmorph.macstorage.probe
+
+jobs:
+  core-linux:
+    name: ProbeCore tests (Linux)
+    runs-on: ubuntu-24.04
+    container: swift:6.0
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --package-path "$PACKAGE"
+
+  app-macos:
+    name: Build, sign and package (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Test
+        run: swift test --package-path "$PACKAGE"
+
+      - name: Build universal binary
+        run: |
+          swift build --package-path "$PACKAGE" -c release --arch arm64 --arch x86_64 --product Probe
+          bin="$(swift build --package-path "$PACKAGE" -c release --arch arm64 --arch x86_64 --show-bin-path)/Probe"
+          lipo -info "$bin"
+          echo "BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/probe-v* ]]; then
+            version="${GITHUB_REF_NAME#probe-v}"
+          else
+            version="0.0.0-dev"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Bundle
+        run: |
+          mkdir -p dist
+          scripts/bundle-app.sh "$BIN" "$APP_NAME" "$BUNDLE_ID" "$VERSION" "$GITHUB_RUN_NUMBER" "$COMMIT" dist
+
+      - name: Sign
+        # Secrets are never available to pull requests; those builds stay unsigned.
+        if: github.event_name != 'pull_request'
+        env:
+          SIGNING_P12_BASE64: ${{ secrets.SIGNING_P12_BASE64 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+        run: scripts/ci-sign.sh "dist/$APP_NAME.app" "$BUNDLE_ID"
+
+      - name: Zip
+        run: |
+          cd dist
+          ditto -c -k --keepParent "$APP_NAME.app" "$APP_NAME-$VERSION.zip"
+          shasum -a 256 "$APP_NAME-$VERSION.zip" | tee "$APP_NAME-$VERSION.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ env.VERSION }}
+          path: dist/*.zip*
+          retention-days: 14
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/probe-v')
+    needs: [core-linux, app-macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#probe-v}"
+          cat > notes.md <<EOF
+          Throwaway M0 probe build ${version}. See [docs/PLAN.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/docs/PLAN.md) and the README for what it checks.
+
+          **Install**
+          1. Download \`${APP_NAME}-${version}.zip\`, unzip it, and move \`${APP_NAME}.app\` to Applications.
+          2. In Terminal: \`xattr -dr com.apple.quarantine /Applications/${APP_NAME}.app\`
+          3. Open it.
+
+          It is signed with the project's self-signed certificate, not notarized, so macOS won't open it until step 2 is done.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* --prerelease --title "Probe ${version}" --notes-file notes.md

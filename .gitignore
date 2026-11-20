@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+dist/
+*.xcodeproj/xcuserdata/
+DerivedData/
+.DS_Store
+# Signing material and raw probe output never belong in the repo.
+*.p12
+*.key
+key.pem
+*-raw.*

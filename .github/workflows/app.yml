@@ -1,0 +1,123 @@
+name: App
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths-ignore:
+      - "spikes/**"
+      - "docs/**"
+      - "README.md"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: MacStorage
+  BUNDLE_ID: io.github.osmorph.macstorage
+
+jobs:
+  core-linux:
+    name: StorageCore tests (Linux)
+    runs-on: ubuntu-24.04
+    container: swift:6.0
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+
+  macos:
+    name: Build, test, screenshots (macOS)
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: xcodebuild -version && swift --version
+
+      - name: Test
+        run: swift test
+
+      - name: Build universal app
+        run: |
+          swift build -c release --arch arm64 --arch x86_64 --product MacStorage
+          echo "BIN=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/MacStorage" >> "$GITHUB_ENV"
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="0.0.0-dev"; fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Bundle
+        run: |
+          mkdir -p dist
+          scripts/bundle-app.sh "$BIN" "$APP_NAME" "$BUNDLE_ID" "$VERSION" "$GITHUB_RUN_NUMBER" "$COMMIT" dist
+
+      - name: Screenshots (demo data, both appearances)
+        run: |
+          mkdir -p screenshots
+          for appearance in light dark; do
+            "dist/$APP_NAME.app/Contents/MacOS/$APP_NAME" --demo --snapshots "$PWD/screenshots/$appearance" --appearance "$appearance"
+          done
+          ls -R screenshots | head -60
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots
+          retention-days: 14
+
+      - name: Sign
+        if: github.event_name != 'pull_request'
+        env:
+          SIGNING_P12_BASE64: ${{ secrets.SIGNING_P12_BASE64 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+        run: scripts/ci-sign.sh "dist/$APP_NAME.app" "$BUNDLE_ID"
+
+      - name: Zip
+        run: |
+          cd dist
+          ditto -c -k --keepParent "$APP_NAME.app" "$APP_NAME-$VERSION.zip"
+          shasum -a 256 "$APP_NAME-$VERSION.zip" | tee "$APP_NAME-$VERSION.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ env.VERSION }}
+          path: dist/*.zip*
+          retention-days: 14
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [core-linux, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: MacStorage-*
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cat > notes.md <<EOF
+          macstorage ${version}.
+
+          **Install** (Terminal; \`curl\` doesn't add the quarantine mark that makes macOS refuse a self-signed app):
+          \`\`\`sh
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/MacStorage-${version}.zip" -o /tmp/macstorage.zip && rm -rf /Applications/MacStorage.app && ditto -x -k /tmp/macstorage.zip /Applications && open /Applications/MacStorage.app
+          \`\`\`
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* --prerelease --title "macstorage ${version}" --notes-file notes.md --repo "$GITHUB_REPOSITORY"

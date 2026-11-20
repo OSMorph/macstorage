@@ -1,0 +1,3 @@
+Would remove: /opt/homebrew/Library/Homebrew/vendor/portable-ruby/3.3.4_1 (1,588 files, 33.6MB)
+Would remove: /Users/USER/Library/Caches/Homebrew/downloads/abc--node-24.18.0.bottle.tar.gz (58.2MB)
+==> This operation would free approximately 240.5MB of disk space.

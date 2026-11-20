@@ -1,0 +1,82 @@
+import Foundation
+
+/// Parsers for tool output. Each takes the raw text a tool printed and returns plain values,
+/// so they can be tested against captured output without running the tools.
+public enum Parse {
+    /// Docker's human sizes: "8.252GB", "112.8MB", "432kB", "0B", "7.49GB (90%)".
+    public static func dockerSize(_ text: String) -> Int64? {
+        let s = text.split(separator: " ").first.map(String.init) ?? text
+        let units: [(String, Double)] = [("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3), ("KB", 1e3), ("B", 1)]
+        for (suffix, factor) in units where s.hasSuffix(suffix) {
+            guard let value = Double(s.dropLast(suffix.count)) else { return nil }
+            return Int64((value * factor).rounded())
+        }
+        return nil
+    }
+
+    /// One JSON object per line, as printed by `--format '{{json .}}'`. Lines that aren't
+    /// valid JSON objects are ignored.
+    public static func jsonLines(_ text: String) -> [[String: String]] {
+        text.split(whereSeparator: \.isNewline).compactMap { line in
+            guard let data = line.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return object.compactMapValues { value in
+                switch value {
+                case let s as String: s
+                case let n as NSNumber: n.stringValue
+                default: nil
+                }
+            }
+        }
+    }
+
+    public struct DockerUsage: Equatable, Sendable {
+        public var type: String
+        public var total: Int
+        public var active: Int
+        public var size: Int64
+        public var reclaimable: Int64
+    }
+
+    /// `docker system df --format '{{json .}}'`
+    public static func dockerSystemDF(_ text: String) -> [DockerUsage] {
+        jsonLines(text).compactMap { row in
+            guard let type = row["Type"], let size = row["Size"].flatMap(dockerSize) else { return nil }
+            return DockerUsage(type: type, total: Int(row["TotalCount"] ?? "") ?? 0, active: Int(row["Active"] ?? "") ?? 0,
+                               size: size, reclaimable: row["Reclaimable"].flatMap(dockerSize) ?? 0)
+        }
+    }
+
+    /// Non-empty lines that look like absolute paths (tools that print one path per line).
+    public static func paths(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { $0.hasPrefix("/") }
+    }
+
+    /// `nix-store -q --size <paths…>` prints one byte count per line.
+    public static func nixSizes(_ text: String) -> Int64 {
+        text.split(whereSeparator: \.isNewline).compactMap { Int64($0.trimmingCharacters(in: .whitespaces)) }.reduce(0, +)
+    }
+
+    public struct BrewCleanup: Equatable, Sendable {
+        public var targets: [Target]
+        public var total: Int64?
+    }
+
+    /// `brew cleanup -n`: "Would remove: /path (N files, 33.6MB)" lines and a closing
+    /// "This operation would free approximately 240.5MB of disk space."
+    public static func brewCleanup(_ text: String) -> BrewCleanup {
+        var targets: [Target] = []
+        var total: Int64?
+        for line in text.split(whereSeparator: \.isNewline).map(String.init) {
+            if line.hasPrefix("Would remove: ") {
+                let rest = line.dropFirst("Would remove: ".count)
+                let path = rest.components(separatedBy: " (").first ?? String(rest)
+                let size = rest.split(separator: ",").last.flatMap { dockerSize($0.trimmingCharacters(in: CharacterSet(charactersIn: " )"))) }
+                targets.append(Target(path, bytes: size))
+            } else if let r = line.range(of: "free approximately ") {
+                total = dockerSize(line[r.upperBound...].components(separatedBy: " ").first ?? "")
+            }
+        }
+        return BrewCleanup(targets: targets, total: total)
+    }
+}

@@ -85,12 +85,16 @@ public enum FileSizes {
         return size
     }
 
+    /// Lists beyond this many files aren't kept: the step is then handed to the user.
+    public static let manifestLimit = 200_000
+
     /// Every file under `path` with its size and identity, for a cleanup manifest, plus
     /// whether the list is complete.
     public static func manifest(_ path: String, _ options: WalkOptions = WalkOptions()) -> (targets: [Target], size: FolderSize) {
         var size = FolderSize()
         var targets: [Target] = []
         walk(path, options, into: &size) { p, st in
+            guard targets.count < manifestLimit else { size.finished = false; return }
             targets.append(Target(p, bytes: Int64(st.st_blocks) * 512, identity: FileIdentity(
                 device: Int64(st.st_dev), inode: UInt64(st.st_ino), modified: Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)))
         }
@@ -108,9 +112,11 @@ public enum FileSizes {
 
     private static func walk(_ path: String, _ options: WalkOptions, into size: inout FolderSize, file: (String, stat) -> Void) {
         let deadline = ContinuousClock.now + options.limit
+        // Match exclusions however the path is spelled (/var/… is /private/var/… on disk).
+        let excluded = Set(options.excluding.flatMap { [$0, URL(fileURLWithPath: $0).resolvingSymlinksInPath().path] })
         var seenInodes = Set<UInt64>()
         var st = stat()
-        guard !options.excluding.contains(path), lstat(path, &st) == 0 else { size.unreadable += 1; return }
+        guard !excluded.contains(path), lstat(path, &st) == 0 else { size.unreadable += 1; return }
         let rootDevice = st.st_dev
 
         func add(_ p: String, _ st: stat) {
@@ -138,7 +144,7 @@ public enum FileSizes {
             guard lstat(p, &st) == 0 else { unreadable += 1; continue }
             switch st.st_mode & S_IFMT {
             case S_IFDIR:
-                if st.st_dev != rootDevice || options.excluding.contains(p)
+                if st.st_dev != rootDevice || excluded.contains(p)
                     || (options.skipGitCheckouts && FileManager.default.fileExists(atPath: p + "/.git")) {
                     walker.skipDescendants()
                 }

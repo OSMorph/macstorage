@@ -166,6 +166,7 @@ struct ResultsPhase: View {
     @State private var confirmingDelete = false
     @State private var includePicked = false
     @State private var receiptURL: URL?
+    @State private var deleting = false
 
     var body: some View {
         let inTrash = run.stillInTrash
@@ -248,10 +249,11 @@ struct ResultsPhase: View {
                 HStack {
                     Button("Cancel") { confirmingDelete = false }.keyboardShortcut(.cancelAction)
                     Button(count == 0 ? "Nothing selected" : "Delete \(plural(count, "item")) (\(formatBytes(bytes))) permanently", role: .destructive) {
-                        model.deleteFromTrash(run, includePicked: includePicked)
-                        confirmingDelete = false
+                        deleting = true
+                        Task { await model.deleteFromTrash(run, includePicked: includePicked); deleting = false; confirmingDelete = false }
                     }
-                    .disabled(count == 0)
+                    .disabled(count == 0 || deleting)
+                    if deleting { ProgressView().controlSize(.small) }
                 }
             }
             .padding(10).overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.red.opacity(0.5)))

@@ -93,10 +93,10 @@ public struct LibraryProvider: Provider {
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
         var byApp: [String: [Fact]] = [:]
-        func collect(_ folder: String, _ kind: ItemKind) {
-            let root = ctx.expand(folder)
+        func collect(_ folder: String, _ kind: ItemKind) async {
+            let root = ctx.expand(folder), options = ctx.walk()
             guard !ctx.protectedPaths.contains(root) else { return }
-            for (name, size) in FileSizes.children(of: root, ctx.walk()) where size.allocated >= Self.threshold {
+            for (name, size) in await offload({ FileSizes.children(of: root, options) }) where size.allocated >= Self.threshold {
                 let path = root + "/" + name, key = Self.appKey(name)
                 var fact = Fact(kind, key: "\((folder as NSString).lastPathComponent)/\(name)", onDisk: size.onDisk,
                                 sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
@@ -105,20 +105,22 @@ public struct LibraryProvider: Provider {
                 byApp[key, default: []].append(fact)
             }
         }
-        collect("~/Library/Caches", .appCache)
-        collect("~/Library/Application Support", .appData)
-        collect("~/Library/Containers", .appData)
-        collect("~/Library/Group Containers", .appData)
+        await collect("~/Library/Caches", .appCache)
+        await collect("~/Library/Application Support", .appData)
+        await collect("~/Library/Containers", .appData)
+        await collect("~/Library/Group Containers", .appData)
         // Developer tools have their own providers.
         let toolKeys: Set<String> = ["go-build", "pip", "pypoetry", "Homebrew", "com.docker.docker", "group.com.docker", "pnpm", "uv"]
         let owners = byApp.filter { !toolKeys.contains($0.key) }.map { key, facts in
             Owner(id: "app:" + key, name: Self.appName(key), kind: .apps, location: facts.compactMap(\.path).map(ctx.display).joined(separator: ", "), items: facts.map(Rules.item))
         }
-        let logs = ctx.expand("~/Library/Logs")
-        let (logTargets, logSize) = FileSizes.manifest(logs, ctx.walk())
-        var logFact = Fact(.appLogs, onDisk: logSize.onDisk, reclaimable: logSize.reclaimable, targets: logTargets, path: logs)
-        logFact.targetsComplete = logSize.isComplete
-        let logBytes = logSize.allocated
+        // Logs go to the Trash folder by folder (one per app), so the list stays short.
+        let logs = ctx.expand("~/Library/Logs"), options = ctx.walk()
+        let logFolders = await offload { FileSizes.children(of: logs, options) }
+        let logTargets = logFolders.map { Target(logs + "/" + $0.name, bytes: $0.size.privateBytes, identity: FileSizes.identity(logs + "/" + $0.name)) }
+        let logBytes = logFolders.map { $0.size.allocated }.reduce(0, +)
+        var logFact = Fact(.appLogs, onDisk: .bytes(logBytes), reclaimable: .bytes(logFolders.map { $0.size.privateBytes }.reduce(0, +)), targets: logTargets, path: logs)
+        logFact.targetsComplete = logFolders.allSatisfy { $0.size.isComplete }
         let logOwner = Owner(id: "logs", name: "Logs", kind: .system, location: "~/Library/Logs", items: [Rules.item(logFact)])
         return ProviderResult(owners: owners + (logBytes > 0 ? [logOwner] : []),
                               coverage: [CoverageEntry(area: area, status: .measured, detail: "Caches, app data\(ctx.fullDiskAccess ? ", containers" : "") and logs in ~/Library.")])

@@ -41,7 +41,8 @@ public struct LanguageCachesProvider: Provider {
     private func clearable(_ ctx: ScanContext, _ kind: ItemKind, ask tool: String, _ args: [String]) async -> Fact? {
         guard let reported = await ctx.output(tool, args)?.split(separator: "\n").first.map({ String($0).trimmingCharacters(in: .whitespaces) }),
               reported.hasPrefix("/"), ctx.exists(reported) else { return nil }
-        let (targets, size) = FileSizes.manifest(reported, ctx.walk())
+        let options = ctx.walk()
+        let (targets, size) = await offload { FileSizes.manifest(reported, options) }
         var fact = Fact(kind, onDisk: size.onDisk, sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
                         targets: targets, root: reported)
         fact.targetsComplete = size.isComplete
@@ -49,10 +50,10 @@ public struct LanguageCachesProvider: Provider {
     }
 
     /// A folder the app moves to the Trash as a whole, or one only the user handles.
-    private func folder(_ ctx: ScanContext, _ kind: ItemKind, _ path: String) -> Fact? {
-        let p = ctx.expand(path)
+    private func folder(_ ctx: ScanContext, _ kind: ItemKind, _ path: String) async -> Fact? {
+        let p = ctx.expand(path), options = ctx.walk()
         guard ctx.exists(p) else { return nil }
-        let size = FileSizes.measure(p, ctx.walk())
+        let size = await offload { FileSizes.measure(p, options) }
         return Fact(kind, onDisk: size.onDisk, sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
                     targets: [Target(p, bytes: size.privateBytes, identity: FileSizes.identity(p))], path: p)
     }
@@ -66,14 +67,14 @@ public struct LanguageCachesProvider: Provider {
         let pnpmRoot = await ctx.output("pnpm", ["store", "path"])?.trimmingCharacters(in: .whitespacesAndNewlines)
         let pnpm = pnpmRoot.flatMap { root -> Fact? in
             guard ctx.exists(root) else { return nil }
-            let s = FileSizes.measure(root, ctx.walk())
+            let s = FileSizes.measure(root, ctx.walk())   // already off the main actor; pnpm stores are small to walk
             // Hard links into node_modules folders bound what a prune can free from above.
             return Fact(.pnpmStore, onDisk: s.onDisk, reclaimable: s.reclaimable, path: root)
         }
 
         let go = [await goMod, await goBuild].compactMap { $0 }
-        let node = [await npm, pnpm, folder(ctx, .voltaToolchains, "~/.volta")].compactMap { $0 }
-        let python = [await uv, await pip, folder(ctx, .poetryCache, "~/Library/Caches/pypoetry"), folder(ctx, .pyenvVersions, "~/.pyenv/versions")].compactMap { $0 }
+        let node = [await npm, pnpm, await folder(ctx, .voltaToolchains, "~/.volta")].compactMap { $0 }
+        let python = [await uv, await pip, await folder(ctx, .poetryCache, "~/Library/Caches/pypoetry"), await folder(ctx, .pyenvVersions, "~/.pyenv/versions")].compactMap { $0 }
         let owners = [("go", "Go", go), ("node", "Node.js", node), ("python", "Python", python)].compactMap { id, name, facts -> Owner? in
             facts.isEmpty ? nil : Owner(id: id, name: name, kind: .developerTools,
                                         location: facts.compactMap(\.path).map(ctx.display).joined(separator: ", "), items: facts.map(Rules.item))

@@ -70,9 +70,9 @@ public struct Shell: ToolRunning {
         let deadline = ContinuousClock.now + timeout
         var timedOut = false
         await withTaskCancellationHandler {
-            while job.process.isRunning {
+            while job.process.isRunning, !Task.isCancelled {
                 if ContinuousClock.now >= deadline { timedOut = true; break }
-                try? await Task.sleep(for: .milliseconds(50))
+                await pause(.milliseconds(50))
             }
         } onCancel: {
             job.stop()
@@ -80,7 +80,7 @@ public struct Shell: ToolRunning {
         if job.process.isRunning { job.stop() }
         // Wait for exit, but never forever: a child holding the pipes open can't block us.
         let waitUntil = ContinuousClock.now + .seconds(5)
-        while job.process.isRunning, ContinuousClock.now < waitUntil { try? await Task.sleep(for: .milliseconds(50)) }
+        while job.process.isRunning, ContinuousClock.now < waitUntil { await pause(.milliseconds(50)) }
         let (out, err, truncated) = job.finish()
         return ToolOutput(status: job.process.isRunning ? -1 : job.process.terminationStatus, stdout: out, stderr: err,
                           timedOut: timedOut, truncated: truncated)
@@ -118,12 +118,23 @@ public struct Shell: ToolRunning {
             }
         }
 
+        /// SIGTERM to the tool and everything it started, then SIGKILL two seconds later.
         func stop() {
             guard process.isRunning else { return }
+            let tree = descendants(of: process.processIdentifier)
             process.terminate()
+            tree.forEach { kill($0, SIGTERM) }
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [self] in
                 if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                tree.forEach { kill($0, SIGKILL) }
             }
+        }
+
+        private func descendants(of pid: pid_t) -> [pid_t] {
+            var buffer = [pid_t](repeating: 0, count: 256)
+            let n = Int(proc_listchildpids(pid, &buffer, Int32(buffer.count * MemoryLayout<pid_t>.size)))
+            let children = Array(buffer.prefix(max(0, n)))
+            return children + children.flatMap { descendants(of: $0) }
         }
 
         func finish() -> (String, String, Bool) {
@@ -135,6 +146,19 @@ public struct Shell: ToolRunning {
             return lock.withLock { (String(decoding: stdout, as: UTF8.self), String(decoding: stderr, as: UTF8.self), dropped) }
         }
     }
+}
+
+/// Sleeps without being cut short by cancellation, so wait loops can't spin.
+func pause(_ duration: Duration) async {
+    let nanos = UInt64(duration.components.seconds) * 1_000_000_000 + UInt64(duration.components.attoseconds / 1_000_000_000)
+    await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+        DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(nanos))) { c.resume() }
+    }
+}
+
+/// Runs blocking filesystem work on a dispatch queue instead of Swift's cooperative pool.
+public func offload<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { c in DispatchQueue.global(qos: .utility).async { c.resume(returning: work()) } }
 }
 
 private extension FileHandle {

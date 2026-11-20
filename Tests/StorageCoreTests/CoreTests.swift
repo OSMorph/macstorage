@@ -155,6 +155,8 @@ final class RunRecordTests: XCTestCase {
         return RunRecord(started: Demo.scanDate, finished: Demo.scanDate, steps: steps)
     }
 
+    func index(_ run: RunRecord, _ id: String) -> Int { run.steps.firstIndex { $0.step.id == id }! }
+
     func testFreedIsMeasuredAndSplitAndSkipsCountNothing() {
         let run = makeRun()
         XCTAssertEqual(run.doneCount, 1)
@@ -165,7 +167,7 @@ final class RunRecordTests: XCTestCase {
 
     func testUnmeasuredStepsAreReportedAsPredictions() {
         var run = makeRun()
-        run.steps[0].outcome = .done(measured: nil)
+        run.steps[index(run, "go/goBuildCache")].outcome = .done(measured: nil)
         XCTAssertEqual(run.freed(.mac), 0)
         XCTAssertEqual(run.unmeasured(.mac), Demo.gb(3))
         XCTAssertTrue(Receipt.text(run).contains("predicted 3.0 GB, not re-measured"))
@@ -184,7 +186,7 @@ final class RunRecordTests: XCTestCase {
         XCTAssertTrue(StepOutcome.failed(error: "x").stopsRun)
         XCTAssertFalse(StepOutcome.skipped(reason: "x").stopsRun)
         var run = makeRun()
-        run.steps[0].outcome = .partial(measured: 5, problems: ["batch 2 of 3: path is alive"])
+        run.steps[index(run, "go/goBuildCache")].outcome = .partial(measured: 5, problems: ["batch 2 of 3: path is alive"])
         XCTAssertTrue(Receipt.text(run).contains("PARTLY DONE · Go · Build cache"))
         XCTAssertTrue(Receipt.text(run).contains("Problem: batch 2 of 3: path is alive"))
         XCTAssertTrue(Receipt.text(run).contains("Executed:\n    go clean -cache"))
@@ -194,7 +196,8 @@ final class RunRecordTests: XCTestCase {
         var run = makeRun()
         let mine = TrashEntry(original: "~/Downloads/a.iso", landed: "/t/a.iso", identity: nil, bytes: 7, picked: true)
         let cache = TrashEntry(original: "~/Library/Caches/x", landed: "/t/x", identity: nil, bytes: 5, picked: false)
-        run.steps[2] = .init(step: run.steps[2].step, outcome: .done(measured: 12), trashed: [cache, mine])
+        let i = index(run, "downloads/downloads")
+        run.steps[i] = .init(step: run.steps[i].step, outcome: .done(measured: 12), trashed: [cache, mine])
         XCTAssertEqual(run.trashed.first, mine, "the user's own files come first")
         run.trashDeletions.append(.init(date: Demo.scanDate, deleted: [cache], refused: ["/t/gone"]))
         XCTAssertEqual(run.deletedFromTrash, 5)

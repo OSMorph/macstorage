@@ -14,7 +14,16 @@ public struct HistoryStore: Sendable {
     private var historyURL: URL { folder.appending(path: "history.json") }
 
     public func loadSnapshot() -> Snapshot? { load(snapshotURL) }
-    public func loadHistory() -> History { load(historyURL) ?? History() }
+
+    /// The history, or an empty one if there is none yet. A file that exists but can't be
+    /// read is moved aside (never overwritten), so a format change or damage loses nothing.
+    public func loadHistory() -> History {
+        guard FileManager.default.fileExists(atPath: historyURL.path) else { return History() }
+        if let history: History = load(historyURL) { return history }
+        let aside = folder.appending(path: "history-unreadable-\(Int(Date().timeIntervalSince1970)).json")
+        try? FileManager.default.moveItem(at: historyURL, to: aside)
+        return History()
+    }
 
     public func save(_ snapshot: Snapshot) throws {
         try write(snapshot, to: snapshotURL)

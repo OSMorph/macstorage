@@ -263,7 +263,11 @@ struct CleanupView: View {
                     Text("\(plural(plan.steps.count, "step")) · \(formatBytes(plan.expected(.mac))) right away, \(formatBytes(plan.expected(.trash))) after emptying the Trash, \(formatBytes(plan.expected(.containerDisk))) inside Docker's disk")
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Preview cleanup…", action: model.openPreview).buttonStyle(.borderedProminent).disabled(plan.steps.isEmpty).keyboardShortcut(.defaultAction)
+                    if model.scanIsTooOld {
+                        Text("The last scan is more than a day old. Scan again before cleaning up, so the lists are current.").font(.caption).foregroundStyle(.orange)
+                    }
+                    Button("Preview cleanup…", action: model.openPreview).buttonStyle(.borderedProminent)
+                        .disabled(plan.steps.isEmpty || model.scanIsTooOld).keyboardShortcut(.defaultAction)
                 }
                 .padding(12)
             }

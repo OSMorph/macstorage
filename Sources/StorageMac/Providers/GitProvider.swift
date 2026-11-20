@@ -75,17 +75,33 @@ public struct GitProvider: Provider {
         return found
     }
 
+    /// When the checkout was last used: its index and HEAD change on every commit, checkout
+    /// or staging. A worktree's live git folder is the one its `.git` file points to.
+    static func lastActivity(_ path: String, isWorktree: Bool) -> Date {
+        var gitDir = path + "/.git"
+        if isWorktree, let pointer = try? String(contentsOfFile: gitDir, encoding: .utf8),
+           let line = pointer.split(separator: "\n").first(where: { $0.hasPrefix("gitdir:") }) {
+            let dir = line.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespaces)
+            gitDir = dir.hasPrefix("/") ? dir : (path as NSString).appendingPathComponent(dir)
+        }
+        return ["index", "HEAD", "logs/HEAD"].compactMap {
+            (try? FileManager.default.attributesOfItem(atPath: gitDir + "/" + $0))?[.modificationDate] as? Date
+        }.max() ?? .distantPast
+    }
+
     func inspect(_ ctx: ScanContext, _ path: String, isWorktree: Bool) async -> Checkout {
         // "## main...origin/main [ahead 2]" plus one line per changed file.
         let status = await ctx.output("git", ["-C", path, "status", "--porcelain=v1", "--branch"], timeout: .seconds(20)) ?? ""
         let lines = status.split(separator: "\n")
         let head = lines.first.map(String.init) ?? ""
         let unsaved = lines.count > 1 || head.contains("ahead") || !head.contains("...")
-        let index = path + (isWorktree ? "/.git" : "/.git/index")
-        let modified = (try? FileManager.default.attributesOfItem(atPath: index))?[.modificationDate] as? Date ?? .distantPast
-        let build = Self.buildOutputNames.map { path + "/" + $0 }.filter { FileManager.default.fileExists(atPath: $0) }
-            .map { Target($0, bytes: FileSizes.measure($0, ctx.walk(limit: .seconds(20))).privateBytes, identity: FileSizes.identity($0)) }
-        return Checkout(path: path, isWorktree: isWorktree, lastActivity: modified, hasUnsavedWork: unsaved,
-                        size: FileSizes.measure(path, ctx.walk(limit: .seconds(30))), buildOutput: build)
+        let modified = Self.lastActivity(path, isWorktree: isWorktree)
+        let short = ctx.walk(limit: .seconds(20)), long = ctx.walk(limit: .seconds(30))
+        let (build, size) = await offload {
+            (Self.buildOutputNames.map { path + "/" + $0 }.filter { FileManager.default.fileExists(atPath: $0) }
+                .map { Target($0, bytes: FileSizes.measure($0, short).privateBytes, identity: FileSizes.identity($0)) },
+             FileSizes.measure(path, long))
+        }
+        return Checkout(path: path, isWorktree: isWorktree, lastActivity: modified, hasUnsavedWork: unsaved, size: size, buildOutput: build)
     }
 }

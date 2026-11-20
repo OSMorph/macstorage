@@ -69,6 +69,8 @@ final class AppModel {
     private(set) var fullDiskAccess = FullDiskAccess.isGranted
 
     private var scanTask: Task<Void, Never>?
+    /// Identifies the scan in progress, so late progress from a stopped scan is ignored.
+    private var scanID = UUID()
     private var stopSignal = StopSignal()
     private var tools: ToolLocator?
     private let store = HistoryStore()
@@ -119,11 +121,12 @@ final class AppModel {
         guard scanning == nil, !demo else { return }
         fullDiskAccess = FullDiskAccess.isGranted
         scanning = ScanProgress(finished: [], running: [], total: Scanner.standardProviders.count)
-        let fda = fullDiskAccess
+        let fda = fullDiskAccess, id = UUID()
+        scanID = id
         scanTask = Task {
             let context = ScanContext(tools: Shell(tools: await locator()), fullDiskAccess: fda)
-            let result = await Scanner().scan(context) { p in Task { @MainActor in self.scanning = p } }
-            guard !Task.isCancelled else { return }
+            let result = await Scanner().scan(context) { p in Task { @MainActor in if self.scanID == id { self.scanning = p } } }
+            guard !Task.isCancelled, scanID == id else { return }
             do { try store.save(result) } catch { saveError = "The scan couldn't be saved: \(error.localizedDescription)" }
             load(result, history: store.loadHistory())
             scanning = nil
@@ -132,8 +135,13 @@ final class AppModel {
 
     func stopScan() {
         scanTask?.cancel()
+        scanID = UUID()
         scanning = nil
     }
+
+    /// Cleanup only runs from a recent scan: targets from an old one may be stale.
+    static let maxScanAge: TimeInterval = 24 * 3600
+    var scanIsTooOld: Bool { !demo && (snapshot.map { Date().timeIntervalSince($0.date) > Self.maxScanAge } ?? true) }
 
     // MARK: Cleanup
 
@@ -150,7 +158,7 @@ final class AppModel {
     }
 
     func openPreview() {
-        guard let plan = plan(), !plan.steps.isEmpty else { return }
+        guard !scanIsTooOld, let plan = plan(), !plan.steps.isEmpty else { return }
         sheet = .preview(plan)
     }
 
@@ -196,9 +204,11 @@ final class AppModel {
         }
     }
 
-    func deleteFromTrash(_ run: RunRecord, includePicked: Bool) {
+    func deleteFromTrash(_ run: RunRecord, includePicked: Bool) async {
         let chosen = run.stillInTrash.filter { includePicked || !$0.picked }
-        let (deleted, refused) = demo ? (chosen, []) : CleanupExecutor.deleteFromTrash(chosen)
+        let demo = demo
+        // Deleting tens of gigabytes takes a while: keep it off the main actor.
+        let (deleted, refused) = await offload { demo ? (chosen, []) : CleanupExecutor.deleteFromTrash(chosen) }
         var updated = run
         updated.trashDeletions.append(.init(date: .now, deleted: deleted, refused: refused))
         if let i = history.runs.firstIndex(where: { $0.id == run.id }) { history.runs[i] = updated }

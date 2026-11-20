@@ -102,10 +102,12 @@ public struct Scanner: Sendable {
             coverage.append(CoverageEntry(area: "Full Disk Access", status: .noAccess,
                                           detail: "Off. Downloads, Documents, Desktop, Mail, Messages and other apps' data were skipped; their space is part of \"Not attributed yet\". Turn it on in System Settings → Privacy & Security → Full Disk Access."))
         }
+        let found = owners
+        let folders = Task.isCancelled ? [:] : await offload { FolderAttribution.folders(context, owners: found) }
         return Snapshot(date: started, scanDuration: Date().timeIntervalSince(started), disk: SystemProvider.diskUsage(),
                         owners: owners.filter { $0.onDisk > 0 || $0.items.contains { $0.onDisk == .notMeasured } }.sorted { $0.onDisk > $1.onDisk },
                         coverage: coverage.sorted { $0.area < $1.area },
-                        folders: FolderAttribution.folders(context, owners: owners))
+                        folders: folders)
     }
 }
 

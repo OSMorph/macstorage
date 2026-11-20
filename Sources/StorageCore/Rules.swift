@@ -190,7 +190,7 @@ public enum Rules {
             return Rule(name: "App data", tier: .review, why: "Settings, documents or downloaded content the app keeps. Only the app can clean this safely.",
                         action: .userActsInApp("Manage this from inside the app"))
         case .appLogs:
-            return Rule(name: "Logs", tier: .safe, why: "Log files apps write. Useful only when troubleshooting.", action: .moveToTrash, unit: "log file")
+            return Rule(name: "Logs", tier: .safe, why: "Log files apps write. Useful only when troubleshooting.", action: .moveToTrash, unit: "log folder")
         case .downloads:
             return Rule(name: "Downloads folder", tier: .review,
                         why: "Files you downloaded. Nothing here rebuilds itself. Pick the files you don't need and they go to the Trash; nothing is removed in bulk.",

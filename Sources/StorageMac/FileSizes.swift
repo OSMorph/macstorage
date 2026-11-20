@@ -93,11 +93,13 @@ public enum FileSizes {
     public static func manifest(_ path: String, _ options: WalkOptions = WalkOptions()) -> (targets: [Target], size: FolderSize) {
         var size = FolderSize()
         var targets: [Target] = []
+        var truncated = false
         walk(path, options, into: &size) { p, st in
-            guard targets.count < manifestLimit else { size.finished = false; return }
+            guard targets.count < manifestLimit else { truncated = true; return }
             targets.append(Target(p, bytes: Int64(st.st_blocks) * 512, identity: FileIdentity(
                 device: Int64(st.st_dev), inode: UInt64(st.st_ino), modified: Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)))
         }
+        if truncated { size.finished = false }
         return (targets, size)
     }
 

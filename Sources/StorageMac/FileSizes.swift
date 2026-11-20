@@ -74,8 +74,8 @@ public enum FileSizes {
     /// seen as `/etc/file`.
     public static func resolvingAncestors(_ path: String) -> String {
         let url = URL(fileURLWithPath: path).standardizedFileURL
-        let parent = url.deletingLastPathComponent().resolvingSymlinksInPath().path
-        return (parent as NSString).appendingPathComponent(url.lastPathComponent)
+        let parent = url.deletingLastPathComponent().path
+        return ((realPath(parent) ?? parent) as NSString).appendingPathComponent(url.lastPathComponent)
     }
 
     /// The path with every symlink resolved, as the filesystem spells it (`/private/var/…`).

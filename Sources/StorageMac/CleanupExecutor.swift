@@ -156,7 +156,7 @@ public struct CleanupExecutor: Sendable {
     /// Moves each approved path to the Trash, target by target.
     private func moveToTrash(_ step: CleanupStep) -> RunRecord.StepResult {
         var moved: [TrashEntry] = [], problems: [String] = []
-        let realHome = URL(fileURLWithPath: home).resolvingSymlinksInPath().path
+        let realHome = FileSizes.realPath(home) ?? home
         for target in step.approvedTargets {
             let path = expand(target.id)
             guard FileSizes.resolvingAncestors(path).hasPrefix(realHome + "/") else {
@@ -190,7 +190,8 @@ public struct CleanupExecutor: Sendable {
     /// is refused and returned as such.
     public static func deleteFromTrash(_ entries: [TrashEntry]) -> (deleted: [TrashEntry], refused: [String]) {
         let trashURL = try? FileManager.default.url(for: .trashDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
-        let trash = (trashURL ?? URL(fileURLWithPath: NSHomeDirectory() + "/.Trash")).resolvingSymlinksInPath().path
+        let trashPath = (trashURL ?? URL(fileURLWithPath: NSHomeDirectory() + "/.Trash")).path
+        let trash = FileSizes.realPath(trashPath) ?? trashPath
         var deleted: [TrashEntry] = [], refused: [String] = []
         for entry in entries {
             guard FileSizes.resolvingAncestors(entry.landed).hasPrefix(trash + "/"),

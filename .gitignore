@@ -9,3 +9,6 @@ DerivedData/
 *.key
 key.pem
 *-raw.*
+
+# Design work that uses real data from a personal Mac. Never committed.
+design-private/

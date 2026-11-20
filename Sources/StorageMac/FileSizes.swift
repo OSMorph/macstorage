@@ -78,6 +78,13 @@ public enum FileSizes {
         return (parent as NSString).appendingPathComponent(url.lastPathComponent)
     }
 
+    /// The path with every symlink resolved, as the filesystem spells it (`/private/var/…`).
+    static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
     /// Walks `path` without following symlinks or leaving the volume.
     public static func measure(_ path: String, _ options: WalkOptions = WalkOptions()) -> FolderSize {
         var size = FolderSize()
@@ -115,7 +122,7 @@ public enum FileSizes {
     private static func walk(_ path: String, _ options: WalkOptions, into size: inout FolderSize, file: (String, stat) -> Void) {
         let deadline = ContinuousClock.now + options.limit
         // Match exclusions however the path is spelled (/var/… is /private/var/… on disk).
-        let excluded = Set(options.excluding.flatMap { [$0, URL(fileURLWithPath: $0).resolvingSymlinksInPath().path] })
+        let excluded = Set(options.excluding.flatMap { [$0, realPath($0)].compactMap { $0 } })
         var seenInodes = Set<UInt64>()
         var st = stat()
         guard !excluded.contains(path), lstat(path, &st) == 0 else { size.unreadable += 1; return }

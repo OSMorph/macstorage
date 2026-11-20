@@ -24,7 +24,7 @@ struct FoldersView: View {
                         .frame(height: 260)
                     Table(rows, selection: $model.selectedFolder) {
                         TableColumn("Folder") { r in Label(r.name, systemImage: r.hasChildren ? "folder.fill" : "folder") }
-                        TableColumn("Mostly") { r in Text(r.bytes == nil ? "—" : r.kind.label).foregroundStyle(.secondary) }.width(140)
+                        TableColumn("Mostly") { r in Text(r.bytes == nil ? "Unknown" : r.kind.label).foregroundStyle(.secondary) }.width(140)
                         TableColumn("On disk") { r in
                             if let b = r.bytes {
                                 HStack(spacing: 4) { Text(formatBytes(b)).monospacedDigit(); if r.isPartial { Text("partial").font(.caption2).foregroundStyle(.secondary) } }
@@ -126,7 +126,7 @@ struct HistoryView: View {
             Text(from == to ? "pick two different scans to compare" : "used on the whole disk between \(label(scans[min(from, to)])) and \(label(scans[max(from, to)]))").foregroundStyle(.secondary)
         }
         if let f = h.forecast() {
-            Text("Forecast, based on the scans from \(f.basedOn.lowerBound.formatted(date: .abbreviated, time: .omitted)) to \(f.basedOn.upperBound.formatted(date: .abbreviated, time: .omitted)): the disk is full in about \(Int(f.daysUntilFull / 30)) months at this rate.")
+            Text("Forecast, based on the scans from \(f.basedOn.lowerBound.formatted(date: .abbreviated, time: .omitted)) to \(f.basedOn.upperBound.formatted(date: .abbreviated, time: .omitted)): \(forecastText(f).lowercased()).")
                 .foregroundStyle(.secondary)
         }
         let owners = Array(Set(scans.flatMap(\.owners.keys))).sorted()
@@ -185,7 +185,7 @@ struct CleanupsLog: View {
                         Text(run.started.formatted(date: .abbreviated, time: .shortened))
                         Text("\(run.doneCount) of \(plural(run.steps.count, "step")) done").foregroundStyle(.secondary)
                         Spacer()
-                        Text("\(formatBytes(run.freedOnMac)) freed · \(formatBytes(run.stillInTrash)) in the Trash · \(formatBytes(run.freed(.containerDisk))) in Docker's disk")
+                        Text("\(formatBytes(run.freedOnMac)) freed · \(formatBytes(run.stillInTrash.map(\.bytes).reduce(0, +))) in the Trash · \(formatBytes(run.freed(.containerDisk))) in Docker's disk")
                             .monospacedDigit().foregroundStyle(.secondary)
                         Button(open.contains(run.id) ? "Hide receipt" : "View receipt") { toggle(run.id) }.buttonStyle(.link)
                     }

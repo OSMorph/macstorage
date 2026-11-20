@@ -18,6 +18,10 @@ public struct Fact: Sendable {
     public var path: String?
     /// Numbers the explanation quotes ("23 of 44 images").
     public var counts: [String: Int]
+    /// False when the target list is known to be incomplete.
+    public var targetsComplete = true
+    /// For app caches: the app's bundle ID.
+    public var appBundleID: String?
 
     public init(_ kind: ItemKind, key: String = "", name: String? = nil, onDisk: Measure,
                 sharedBytes: Int64? = nil, reclaimable: Measure? = nil, targets: [Target] = [],
@@ -58,12 +62,19 @@ public enum Rules {
     public static func item(_ f: Fact) -> Item {
         let r = rule(for: f)
         let reclaimable = f.reclaimable ?? (r.tier.isCleanable ? f.onDisk : .bytes(0))
-        return Item(id: f.key.isEmpty ? f.kind.rawValue : "\(f.kind.rawValue):\(f.key)",
+        var action = r.action
+        // A folder-clearing command acts on everything in the folder; if the list shown is
+        // incomplete, the user can't see the whole scope, so hand it over instead.
+        if case .clearFolder(let command, _, _) = action, !f.targetsComplete {
+            action = .userRunsCommand(command.display(), needsAdmin: false)
+        }
+        return Item(id: f.key.isEmpty ? f.kind.rawValue : "\(f.kind.rawValue):\(f.key)", kind: f.kind,
                     name: f.name ?? r.name, onDisk: f.onDisk, sharedBytes: f.sharedBytes,
                     reclaimable: r.tier == .review ? .unknown : reclaimable,
-                    reclaimableIsUpperBound: f.kind == .pnpmStore, tier: r.tier,
-                    explanation: r.why, basis: r.basis, action: r.action,
-                    targets: f.targets, targetUnit: r.unit, path: f.path)
+                    reclaimableIsUpperBound: f.kind == .pnpmStore || f.kind == .dockerUnusedImages, tier: r.tier,
+                    explanation: r.why, basis: f.targetsComplete ? r.basis : (r.basis.map { $0 + " " } ?? "") + "The list is incomplete (the scan stopped early or some folders couldn't be read).",
+                    action: action, targets: f.targets, targetUnit: r.unit, targetsComplete: f.targetsComplete,
+                    path: f.path, appBundleID: f.appBundleID)
     }
 
     struct Rule {
@@ -99,10 +110,11 @@ public enum Rules {
             return Rule(name: "Build cache", tier: .safe,
                         why: "\(f.count("records")) cache records, none used by a running build. The next build of each project is slower while it refills.",
                         basis: "Docker removes unused records as a set, so the app binds it two ways: the until filter means nothing created after you reviewed the list can be removed, and right before running the app lists the unused records again and skips the step if they differ from the list you approved. Records in use are never pruned.",
-                        action: .runAfterRecheck(docker(["builder", "prune", "-f", "--filter", "until=\(Command.previewTimeToken)"]), .containerDisk), unit: "cache record")
+                        action: .runAfterRecheck(docker(["buildx", "prune", "--builder", root, "-f", "--filter", "until=\(Command.previewTimeToken)"]), .containerDisk), unit: "cache record")
         case .dockerUnusedImages:
             return Rule(name: "Images no container uses", tier: .probablySafe,
                         why: "\(f.count("unused")) of \(f.count("total")) images have no container. They download or rebuild when needed. The app removes exactly the approved IDs; Docker refuses any image a container has started using since.",
+                        basis: "Images share layers, so the space freed is at most the figure shown.",
                         action: .runOnTargets(docker(["image", "rm"]), .containerDisk), unit: "image")
         case .dockerStoppedContainers:
             return Rule(name: "Stopped containers", tier: .review,
@@ -131,7 +143,7 @@ public enum Rules {
         case .voltaToolchains:
             return Rule(name: "Node versions installed by volta", tier: .probablySafe,
                         why: "Every Node, npm and yarn version volta has fetched. Old ones can go; volta fetches a version again if a project pins it.",
-                        action: .userRunsCommand("volta list all", needsAdmin: false))
+                        action: .userActsInApp("Check which versions you use with “volta list all”, then remove old ones with volta."))
         case .uvCache:
             return Rule(name: "uv cache", tier: .safe,
                         why: "uv clones packages from its cache into each virtual environment, so most of the folder is shared with your environments and stays on disk. Cleaning frees only the part nothing else uses.",
@@ -143,7 +155,7 @@ public enum Rules {
             return Rule(name: "Poetry cache", tier: .safe, why: "Downloaded packages and metadata.", action: .moveToTrash, unit: "folder")
         case .pyenvVersions:
             return Rule(name: "Python versions installed by pyenv", tier: .probablySafe, why: "Old Python versions you may no longer use.",
-                        action: .userRunsCommand("pyenv versions", needsAdmin: false))
+                        action: .userActsInApp("Check which versions you use with “pyenv versions”, then remove old ones with “pyenv uninstall”."))
         case .homebrewOldVersions:
             return Rule(name: "Old versions and downloads", tier: .safe,
                         why: "What a dry run of brew cleanup would remove.", basis: recheck,
@@ -172,7 +184,7 @@ public enum Rules {
         case .gitRecent:
             return Rule(name: "Clean checkouts in recent use", tier: .leaveAlone, why: "Checkouts you have worked in during the last 90 days.")
         case .appCache:
-            return Rule(name: "Cache", tier: .safe, why: "The app refills its cache as you use it. Quit the app first; the app asks if it is running.",
+            return Rule(name: "Cache", tier: .safe, why: "The app refills its cache as you use it. If the app is running when cleanup starts, this step is skipped so its cache isn't pulled from under it.",
                         action: .moveToTrash, unit: "folder")
         case .appData:
             return Rule(name: "App data", tier: .review, why: "Settings, documents or downloaded content the app keeps. Only the app can clean this safely.",

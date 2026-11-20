@@ -11,7 +11,9 @@ struct LaunchOptions {
     var snapshots: URL?
     var appearance: NSAppearance.Name?
 
-    init(_ args: [String] = CommandLine.arguments) {
+    static let current = LaunchOptions(CommandLine.arguments)
+
+    init(_ args: [String]) {
         demo = args.contains("--demo")
         if let i = args.firstIndex(of: "--snapshots"), args.indices.contains(i + 1) { snapshots = URL(fileURLWithPath: args[i + 1]) }
         if let i = args.firstIndex(of: "--appearance"), args.indices.contains(i + 1) {
@@ -20,27 +22,26 @@ struct LaunchOptions {
     }
 }
 
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let model = AppModel(demo: LaunchOptions.current.demo)
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let options = LaunchOptions.current
+        if let name = options.appearance { NSApp.appearance = NSAppearance(named: name) }
+        guard let folder = options.snapshots else { return }
+        Task { await SnapshotTour(model: Self.model, folder: folder).run() }
+    }
+}
+
 @main
 struct MacStorageApp: App {
-    @State private var model: AppModel
-    private let options = LaunchOptions()
-
-    init() {
-        _model = State(initialValue: AppModel(demo: LaunchOptions().demo))
-        if LaunchOptions().snapshots != nil {
-            // Never let an automated tour hang CI.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 240) { SnapshotTour.log("timed out"); exit(2) }
-        }
-    }
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @State private var model = AppDelegate.model
 
     var body: some Scene {
         Window("macstorage", id: "main") {
-            RootView(model: model)
-                .frame(minWidth: 1040, minHeight: 700)
-                .task {
-                    if let name = options.appearance { NSApp.appearance = NSAppearance(named: name) }
-                    if let folder = options.snapshots { await SnapshotTour(model: model, folder: folder).run() }
-                }
+            RootView(model: model).frame(minWidth: 1040, minHeight: 700)
         }
         .defaultSize(width: 1280, height: 860)
         .commands {
@@ -63,56 +64,75 @@ struct SnapshotTour {
 
     func run() async {
         Self.log("started, writing to \(folder.path)")
+        let watchdog = Task { try? await Task.sleep(for: .seconds(240)); guard !Task.isCancelled else { return }; Self.log("timed out"); exit(2) }
+        defer { watchdog.cancel() }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        await settle()
+        let window = await mainWindow()
+        Self.log("capturing a \(Int(window.frame.width))×\(Int(window.frame.height)) window")
+
         for section in AppSection.allCases {
             model.section = section
-            await shot(section.rawValue)
+            await shot(section.rawValue, window)
         }
-        model.show(owner: "docker", item: "dockerBuildCache")
-        await shot("owners-docker")
-        model.show(owner: "docker", item: "dockerUnusedVolumes")
-        await shot("owners-docker-volumes")
-        model.show(owner: "downloads", item: "downloads")
-        model.picks["downloads"] = ["~/Downloads/Xcode_26.1.xip", "~/Downloads/Docker.dmg"]
-        await shot("owners-downloads-picked")
+        model.show(owner: "docker", item: "docker/dockerBuildCache")
+        await shot("owners-docker", window)
+        model.show(owner: "docker", item: "docker/dockerUnusedVolumes")
+        await shot("owners-docker-volumes", window)
+        model.show(owner: "downloads", item: "downloads/downloads")
+        model.picks["downloads/downloads"] = ["~/Downloads/Xcode_26.1.xip", "~/Downloads/Docker.dmg"]
+        await shot("owners-downloads-picked", window)
         model.section = .cleanup
-        model.selected.insert("dockerUnusedImages")
-        await shot("cleanup-with-picks")
+        model.selected.insert("docker/dockerUnusedImages")
+        await shot("cleanup-with-picks", window)
         model.openPreview()
-        await shot("sheet-preview", sheet: true)
+        await shot("sheet-preview", window, sheet: true)
         if case .preview(let plan)? = model.sheet {
             model.run(plan)
-            await shot("sheet-running", sheet: true, wait: 0.5)
+            await shot("sheet-running", window, sheet: true, wait: 0.5)
             while case .running? = model.sheet { try? await Task.sleep(for: .milliseconds(200)) }
-            await shot("sheet-results", sheet: true)
+            await shot("sheet-results", window, sheet: true)
         }
         model.sheet = nil
         model.section = .history
-        await shot("history-after-cleanup")
-        model.show(owner: "go", item: "goModuleCache")
-        await shot("owners-cleaned-item")
+        await shot("history-after-cleanup", window)
+        model.show(owner: "go", item: "go/goModuleCache")
+        await shot("owners-cleaned-item", window)
         let saved = model.snapshot
-        model.snapshot = nil
-        await shot("welcome")
-        model.snapshot = saved
+        model.setSnapshot(nil)
+        await shot("welcome", window)
+        model.setSnapshot(saved)
         Self.log("done")
         NSApp.terminate(nil)
     }
 
-    private func settle(_ seconds: Double = 0.6) async { try? await Task.sleep(for: .seconds(seconds)) }
+    /// The app's window, or one made for the tour if none appeared (headless CI sessions).
+    private func mainWindow() async -> NSWindow {
+        for _ in 0..<20 {
+            if let w = NSApp.windows.first(where: { $0.isVisible && $0.sheetParent == nil && $0.contentView != nil }) { return w }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        Self.log("no window appeared; creating one")
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860), styleMask: [.titled, .closable, .resizable],
+                              backing: .buffered, defer: false)
+        window.contentView = NSHostingView(rootView: RootView(model: model).frame(width: 1280, height: 860))
+        window.makeKeyAndOrderFront(nil)
+        return window
+    }
 
-    private func shot(_ name: String, sheet: Bool = false, wait: Double = 0.6) async {
-        await settle(wait)
-        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.sheetParent == nil }),
-              let target = (sheet ? window.attachedSheet ?? window : window).contentView,
-              let rep = target.bitmapImageRepForCachingDisplay(in: target.bounds) else {
-            Self.log("\(name): no window to capture (\(NSApp.windows.count) windows)")
+    private func shot(_ name: String, _ window: NSWindow, sheet: Bool = false, wait: Double = 0.6) async {
+        try? await Task.sleep(for: .seconds(wait))
+        guard let view = (sheet ? window.attachedSheet ?? window : window).contentView,
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            Self.log("\(name): nothing to capture")
             return
         }
-        target.cacheDisplay(in: target.bounds, to: rep)
-        let appearance = NSApp.appearance?.name == .darkAqua ? "dark" : "light"
-        try? rep.representation(using: .png, properties: [:])?.write(to: folder.appending(path: "\(name)-\(appearance).png"))
-        Self.log("\(name) saved")
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let appearance = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? "dark" : "light"
+        do {
+            try rep.representation(using: .png, properties: [:])?.write(to: folder.appending(path: "\(name)-\(appearance).png"))
+            Self.log("\(name) saved")
+        } catch {
+            Self.log("\(name): \(error.localizedDescription)")
+        }
     }
 }

@@ -47,6 +47,26 @@ public enum Parse {
         }
     }
 
+    public struct BuildRecord: Equatable, Sendable {
+        public var id: String
+        public var bytes: Int64?
+        public var reclaimable: Bool
+    }
+
+    /// `docker buildx du --verbose`: blank-line-separated records of "Key: value" lines.
+    /// Records in use show `Reclaimable: false`.
+    public static func buildxRecords(_ text: String) -> [BuildRecord] {
+        text.components(separatedBy: "\n\n").compactMap { block in
+            var fields: [String: String] = [:]
+            for line in block.split(separator: "\n") {
+                guard let colon = line.firstIndex(of: ":") else { continue }
+                fields[line[..<colon].trimmingCharacters(in: .whitespaces)] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            }
+            guard let id = fields["ID"], !id.isEmpty else { return nil }
+            return BuildRecord(id: id, bytes: fields["Size"].flatMap(dockerSize), reclaimable: fields["Reclaimable"] == "true")
+        }
+    }
+
     /// Non-empty lines that look like absolute paths (tools that print one path per line).
     public static func paths(_ text: String) -> [String] {
         text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { $0.hasPrefix("/") }
@@ -69,9 +89,12 @@ public enum Parse {
         var total: Int64?
         for line in text.split(whereSeparator: \.isNewline).map(String.init) {
             if line.hasPrefix("Would remove: ") {
-                let rest = line.dropFirst("Would remove: ".count)
-                let path = rest.components(separatedBy: " (").first ?? String(rest)
-                let size = rest.split(separator: ",").last.flatMap { dockerSize($0.trimmingCharacters(in: CharacterSet(charactersIn: " )"))) }
+                // "<path> (<details>)": paths may contain " (", so split at the last one.
+                let rest = String(line.dropFirst("Would remove: ".count))
+                let open = rest.range(of: " (", options: .backwards)
+                let path = open.map { String(rest[..<$0.lowerBound]) } ?? rest
+                let details = open.map { rest[$0.upperBound...] } ?? ""
+                let size = details.split(separator: ",").last.flatMap { dockerSize($0.trimmingCharacters(in: CharacterSet(charactersIn: " )"))) }
                 targets.append(Target(path, bytes: size))
             } else if let r = line.range(of: "free approximately ") {
                 total = dockerSize(line[r.upperBound...].components(separatedBy: " ").first ?? "")

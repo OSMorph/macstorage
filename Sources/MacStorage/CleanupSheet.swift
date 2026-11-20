@@ -151,6 +151,7 @@ struct OutcomeIcon: View {
     var body: some View {
         switch outcome {
         case .done?: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityLabel("Done")
+        case .partial?: Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange).accessibilityLabel("Partly done")
         case .skipped?: Image(systemName: "arrow.uturn.right.circle").foregroundStyle(.orange).accessibilityLabel("Skipped")
         case .failed?: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red).accessibilityLabel("Failed")
         case .notRun?: Image(systemName: "minus.circle").foregroundStyle(.secondary).accessibilityLabel("Not run")
@@ -167,29 +168,44 @@ struct ResultsPhase: View {
     @State private var receiptURL: URL?
 
     var body: some View {
-        let moved = run.movedToTrash
-        let picked = moved.filter(\.picked), caches = moved.filter { !$0.picked }
+        let inTrash = run.stillInTrash
         VStack(alignment: .leading, spacing: 12) {
             Text("Cleanup finished").font(.title3.weight(.semibold))
             Text(summary).foregroundStyle(.secondary)
-            Totals(mac: run.freedOnMac, trash: run.stillInTrash, docker: run.freed(.containerDisk))
-            if !moved.isEmpty, run.trashDeletions.isEmpty {
-                trashBox(picked: picked, caches: caches)
-            } else if let d = run.trashDeletions.last {
-                Callout("Deleted \(plural(d.paths.count, "item")) (\(formatBytes(d.bytes))) from the Trash.\(d.includedPickedFiles ? "" : picked.isEmpty ? "" : " Your picked files are still in the Trash.")")
+            Totals(mac: run.freedOnMac, trash: inTrash.map(\.bytes).reduce(0, +), docker: run.freed(.containerDisk))
+            let predicted = Destination.allCases.map { run.unmeasured($0) }.reduce(0, +)
+            if predicted > 0 {
+                Text("Plus about \(formatBytes(predicted)) predicted for steps whose space couldn't be re-measured.").font(.caption).foregroundStyle(.secondary)
+            }
+            if let error = model.saveError {
+                HStack {
+                    Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Button("Try again") { model.persist(run) }
+                }
+            }
+            if !inTrash.isEmpty { trashBox(inTrash) }
+            ForEach(run.trashDeletions.indices, id: \.self) { i in
+                let d = run.trashDeletions[i]
+                Callout("Deleted \(plural(d.deleted.count, "item")) (\(formatBytes(d.bytes))) from the Trash."
+                        + (d.refused.isEmpty ? "" : " \(plural(d.refused.count, "item")) had been moved, replaced or restored, so the app left them alone."))
             }
             List(run.steps, id: \.step.id) { r in
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack { OutcomeIcon(outcome: r.outcome); Text("\(r.step.ownerName) · \(r.step.item.name)"); Spacer(); Text(outcomeText(r.outcome)).foregroundStyle(.secondary) }
-                    if case .skipped(let why) = r.outcome {
+                    HStack { OutcomeIcon(outcome: r.outcome); Text("\(r.step.ownerName) · \(r.step.item.name)"); Spacer(); Text(outcomeText(r)).foregroundStyle(.secondary) }
+                    switch r.outcome {
+                    case .skipped(let why):
                         HStack {
                             Text(why).font(.caption).foregroundStyle(.orange)
-                            Button("Review the new list") { model.sheet = nil; model.show(owner: ownerID(r), item: r.step.item.id) }.buttonStyle(.link).font(.caption)
+                            Button("View the approved list") { model.sheet = nil; model.show(owner: ownerID(r), item: r.step.item.id) }.buttonStyle(.link).font(.caption)
                         }
-                    } else if case .notRun = r.outcome {
-                        Text("Not run: cleanup was stopped before this step. Nothing was changed.").font(.caption).foregroundStyle(.secondary)
-                    } else if case .failed(let e) = r.outcome {
+                    case .partial(_, let problems):
+                        ForEach(problems, id: \.self) { Text($0).font(.caption).foregroundStyle(.orange) }
+                    case .notRun(let why):
+                        Text(why + " Nothing was changed.").font(.caption).foregroundStyle(.secondary)
+                    case .failed(let e):
                         Text(e).font(.caption).foregroundStyle(.red)
+                    case .done:
+                        EmptyView()
                     }
                 }
             }
@@ -198,10 +214,10 @@ struct ResultsPhase: View {
                     Label("Saved to \(receiptURL.path(percentEncoded: false))", systemImage: "checkmark").font(.caption).foregroundStyle(.green)
                     Button("Show in Finder") { revealInFinder(receiptURL.path) }.buttonStyle(.link).font(.caption)
                 } else {
-                    Button("History → Cleanups") { model.sheet = nil; model.section = .history; model.openRunID = run.id }.buttonStyle(.link)
+                    Button("Open in History") { model.sheet = nil; model.section = .history; model.openRunID = run.id }.buttonStyle(.link)
                 }
                 Spacer()
-                Button("Save receipt…") { receiptURL = model.saveReceipt(run) }.disabled(model.demo)
+                Button("Save receipt…") { receiptURL = model.receiptURL(run) }.disabled(model.demo).help(model.demo ? "Demo mode doesn't write files." : "")
                 Button("Done") { model.sheet = nil }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
         }
@@ -209,33 +225,38 @@ struct ResultsPhase: View {
     }
 
     @ViewBuilder
-    private func trashBox(picked: [(path: String, bytes: Int64?, picked: Bool)], caches: [(path: String, bytes: Int64?, picked: Bool)]) -> some View {
+    private func trashBox(_ entries: [TrashEntry]) -> some View {
+        let picked = entries.filter(\.picked), caches = entries.filter { !$0.picked }
         if confirmingDelete {
             let count = caches.count + (includePicked ? picked.count : 0)
+            let bytes = caches.map(\.bytes).reduce(0, +) + (includePicked ? picked.map(\.bytes).reduce(0, +) : 0)
             VStack(alignment: .leading, spacing: 8) {
                 Text("Delete items from the Trash permanently? This can't be undone.").fontWeight(.semibold)
                 if !picked.isEmpty {
                     Toggle(isOn: $includePicked) {
                         VStack(alignment: .leading) {
-                            Text("Also delete my \(plural(picked.count, "picked file")). These are your own files, possibly the only copies:").fontWeight(.medium)
-                            ForEach(picked, id: \.path) { Text("\($0.path) · \($0.bytes.map(formatBytes) ?? "")").font(.system(.caption, design: .monospaced)) }
+                            Text("Also delete my \(plural(picked.count, "picked file")) (\(formatBytes(picked.map(\.bytes).reduce(0, +)))). These are your own files, possibly the only copies:").fontWeight(.medium)
+                            ForEach(picked, id: \.landed) { Text("\($0.original) · \(formatBytes($0.bytes))").font(.system(.caption, design: .monospaced)) }
                         }
                     }.toggleStyle(.checkbox)
                 }
                 if !caches.isEmpty {
-                    DisclosureGroup("\(plural(caches.count, "rebuildable cache item"))") {
-                        TargetList(targets: caches.map { Target($0.path, bytes: $0.bytes) }, unit: "item")
+                    DisclosureGroup("\(plural(caches.count, "rebuildable cache item")) (\(formatBytes(caches.map(\.bytes).reduce(0, +))))") {
+                        TargetList(targets: caches.map { Target($0.original, bytes: $0.bytes) }, unit: "item")
                     }
                 }
                 HStack {
                     Button("Cancel") { confirmingDelete = false }.keyboardShortcut(.cancelAction)
-                    Button("Delete \(plural(count, "item")) permanently", role: .destructive) { model.deleteFromTrash(run, includePicked: includePicked) }
-                        .disabled(count == 0)
+                    Button(count == 0 ? "Nothing selected" : "Delete \(plural(count, "item")) (\(formatBytes(bytes))) permanently", role: .destructive) {
+                        model.deleteFromTrash(run, includePicked: includePicked)
+                        confirmingDelete = false
+                    }
+                    .disabled(count == 0)
                 }
             }
             .padding(10).overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.red.opacity(0.5)))
         } else {
-            Callout("This cleanup moved \(plural(picked.count + caches.count, "item")) to the Trash. They stay there until you empty it.") {
+            Callout("\(plural(entries.count, "item")) from this cleanup \(entries.count == 1 ? "is" : "are") in the Trash. They stay there until you empty it.") {
                 Button("Delete just these from the Trash…") { confirmingDelete = true }.buttonStyle(.link)
             }
         }
@@ -243,13 +264,15 @@ struct ResultsPhase: View {
 
     private var summary: String {
         let skipped = run.steps.filter { if case .skipped = $0.outcome { true } else { false } }.count
-        let notRun = run.steps.filter { $0.outcome == .notRun }.count
-        return "\(run.doneCount) of \(plural(run.steps.count, "step")) done" + (skipped > 0 ? ", \(skipped) skipped" : "") + (notRun > 0 ? ", \(notRun) not run" : "") + "."
+        let notRun = run.steps.filter { if case .notRun = $0.outcome { true } else { false } }.count
+        let failed = run.steps.filter { if case .failed = $0.outcome { true } else { false } }.count
+        return "\(run.doneCount) of \(plural(run.steps.count, "step")) done" + (skipped > 0 ? ", \(skipped) skipped" : "")
+            + (failed > 0 ? ", \(failed) failed" : "") + (notRun > 0 ? ", \(notRun) not run" : "") + "."
     }
 
-    private func outcomeText(_ o: StepOutcome) -> String {
-        switch o {
-        case .done(let b): formatBytes(b)
+    private func outcomeText(_ r: RunRecord.StepResult) -> String {
+        switch r.outcome {
+        case .done(let m), .partial(let m, _): m.map(formatBytes) ?? "≈ \(formatBytes(r.step.expectedBytes)) predicted"
         case .skipped: "skipped"
         case .notRun: "not run"
         case .failed: "failed"

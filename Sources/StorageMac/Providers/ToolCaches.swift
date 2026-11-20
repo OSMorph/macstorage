@@ -36,35 +36,39 @@ public struct LanguageCachesProvider: Provider {
 
     public init() {}
 
-    /// A cache the tool can clear itself, found by asking the tool where it is.
-    private func clearable(_ ctx: ScanContext, _ kind: ItemKind, ask tool: String, _ args: [String], fallback: String) async -> Fact? {
-        let reported = await ctx.output(tool, args)?.split(separator: "\n").first.map { String($0).trimmingCharacters(in: .whitespaces) }
-        let root = reported.flatMap { $0.hasPrefix("/") ? $0 : nil } ?? ctx.expand(fallback)
-        guard ctx.exists(root) else { return nil }
-        let size = FileSizes.measure(root)
-        return Fact(kind, onDisk: .bytes(size.privateBytes), sharedBytes: size.shared > 0 ? size.shared : nil,
-                    targets: FileSizes.manifest(root), root: root)
+    /// A cache the tool can clear itself, found by asking the tool where it is. Only used when
+    /// the tool answers: the executor asks it again before clearing.
+    private func clearable(_ ctx: ScanContext, _ kind: ItemKind, ask tool: String, _ args: [String]) async -> Fact? {
+        guard let reported = await ctx.output(tool, args)?.split(separator: "\n").first.map({ String($0).trimmingCharacters(in: .whitespaces) }),
+              reported.hasPrefix("/"), ctx.exists(reported) else { return nil }
+        let (targets, size) = FileSizes.manifest(reported, ctx.walk())
+        var fact = Fact(kind, onDisk: size.onDisk, sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
+                        targets: targets, root: reported)
+        fact.targetsComplete = size.isComplete
+        return fact
     }
 
+    /// A folder the app moves to the Trash as a whole, or one only the user handles.
     private func folder(_ ctx: ScanContext, _ kind: ItemKind, _ path: String) -> Fact? {
         let p = ctx.expand(path)
         guard ctx.exists(p) else { return nil }
-        let size = FileSizes.measure(p)
-        return Fact(kind, onDisk: .bytes(size.privateBytes), targets: [Target(p, bytes: size.privateBytes)], path: p)
+        let size = FileSizes.measure(p, ctx.walk())
+        return Fact(kind, onDisk: size.onDisk, sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
+                    targets: [Target(p, bytes: size.privateBytes, identity: FileSizes.identity(p))], path: p)
     }
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
-        async let goMod = clearable(ctx, .goModuleCache, ask: "go", ["env", "GOMODCACHE"], fallback: "~/go/pkg/mod")
-        async let goBuild = clearable(ctx, .goBuildCache, ask: "go", ["env", "GOCACHE"], fallback: "~/Library/Caches/go-build")
-        async let npm = clearable(ctx, .npmCache, ask: "npm", ["config", "get", "cache"], fallback: "~/.npm")
-        async let uv = clearable(ctx, .uvCache, ask: "uv", ["cache", "dir"], fallback: "~/.cache/uv")
-        async let pip = clearable(ctx, .pipCache, ask: "pip3", ["cache", "dir"], fallback: "~/Library/Caches/pip")
+        async let goMod = clearable(ctx, .goModuleCache, ask: "go", ["env", "GOMODCACHE"])
+        async let goBuild = clearable(ctx, .goBuildCache, ask: "go", ["env", "GOCACHE"])
+        async let npm = clearable(ctx, .npmCache, ask: "npm", ["config", "get", "cache"])
+        async let uv = clearable(ctx, .uvCache, ask: "uv", ["cache", "dir"])
+        async let pip = clearable(ctx, .pipCache, ask: "pip3", ["cache", "dir"])
         let pnpmRoot = await ctx.output("pnpm", ["store", "path"])?.trimmingCharacters(in: .whitespacesAndNewlines)
         let pnpm = pnpmRoot.flatMap { root -> Fact? in
             guard ctx.exists(root) else { return nil }
-            let s = FileSizes.measure(root)
-            // Hard links into node_modules folders are counted once, so private bytes bound what a prune can free.
-            return Fact(.pnpmStore, onDisk: .bytes(s.allocated), reclaimable: .bytes(s.privateBytes), path: root)
+            let s = FileSizes.measure(root, ctx.walk())
+            // Hard links into node_modules folders bound what a prune can free from above.
+            return Fact(.pnpmStore, onDisk: s.onDisk, reclaimable: s.reclaimable, path: root)
         }
 
         let go = [await goMod, await goBuild].compactMap { $0 }

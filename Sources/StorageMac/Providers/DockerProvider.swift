@@ -45,41 +45,44 @@ public struct DockerProvider: Provider {
         }
         let stopped = containers.filter { ($0["State"] ?? "") != "running" }
         let volumes = Parse.jsonLines(await ctx.output("docker", d + ["volume", "ls", "--filter", "dangling=true", "--format", "{{json .}}"]) ?? "")
-        let cacheIDs = (await ctx.output("docker", d + ["buildx", "du", "--verbose"], timeout: .seconds(120)) ?? "")
-            .split(separator: "\n").filter { $0.hasPrefix("ID:") }.map { $0.dropFirst(3).trimmingCharacters(in: .whitespaces) }
+        // The builder named after the context is the engine's own; listing and pruning both use it.
+        let cache = Parse.buildxRecords(await ctx.output("docker", d + ["buildx", "du", "--builder", context, "--verbose"], timeout: .seconds(120)) ?? "")
+            .filter(\.reclaimable)
 
-        let bytes = { (type: String) in usage[type].map { Measure.bytes($0.size) } ?? .bytes(0) }
-        let reclaim = { (type: String) in usage[type].map { Measure.bytes($0.reclaimable) } }
+        let size = { (type: String) in usage[type].map { Measure.bytes($0.size) } ?? .bytes(0) }
+        let imageTargets = unusedImages.compactMap { img in img["ID"].map { Target($0, bytes: Parse.dockerSize(img["Size"] ?? "")) } }
+        // Images share layers, so their listed sizes overlap: cap the estimate at what Docker says is reclaimable.
+        let imageBytes = min(imageTargets.compactMap(\.bytes).reduce(0, +), usage["Images"]?.reclaimable ?? 0)
         var facts = [
-            Fact(.dockerBuildCache, onDisk: bytes("Build Cache"), reclaimable: reclaim("Build Cache"),
-                 targets: cacheIDs.map { Target($0) }, root: context, counts: ["records": cacheIDs.count]),
-            Fact(.dockerUnusedImages, onDisk: bytes("Images"), reclaimable: reclaim("Images"),
-                 targets: unusedImages.compactMap { img in img["ID"].map { Target($0, bytes: Parse.dockerSize(img["Size"] ?? "")) } },
+            Fact(.dockerBuildCache, onDisk: size("Build Cache"), reclaimable: .bytes(cache.compactMap(\.bytes).reduce(0, +)),
+                 targets: cache.map { Target($0.id, bytes: $0.bytes) }, root: context, counts: ["records": cache.count]),
+            Fact(.dockerUnusedImages, onDisk: size("Images"), reclaimable: .bytes(imageBytes), targets: imageTargets,
                  root: context, counts: ["unused": unusedImages.count, "total": images.count]),
-            Fact(.dockerStoppedContainers, onDisk: bytes("Containers"),
+            Fact(.dockerStoppedContainers, onDisk: size("Containers"),
                  targets: stopped.compactMap { $0["Names"].map { Target($0) } }, root: context, counts: ["stopped": stopped.count, "total": containers.count]),
-            Fact(.dockerUnusedVolumes, onDisk: bytes("Local Volumes"),
+            Fact(.dockerUnusedVolumes, onDisk: size("Local Volumes"),
                  targets: volumes.compactMap { $0["Name"].map { Target($0) } }, root: context, counts: ["unused": volumes.count, "total": usage["Local Volumes"]?.total ?? volumes.count]),
         ]
 
-        // The VM disk on the Mac versus what's inside it.
+        // On the Mac, the engine occupies its VM disk; the items above are sized inside it.
         let (name, disk): (String, String?) =
             endpoint.contains(".orbstack") ? ("OrbStack", nil)
-            : endpoint.contains(".colima") ? ("colima", nil)
+            : endpoint.contains(".colima") ? ("colima (\(context))", nil)
             : ("Docker Desktop", ctx.expand("~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"))
-        // `root` names the Docker context; the items live with the engine's data, if known.
-        for i in facts.indices { facts[i].path = nil }
-        var note: String?
+        let dataFolder = disk.map { ($0 as NSString).deletingLastPathComponent }
+        for i in facts.indices { facts[i].path = dataFolder }
+        var note: String? = disk == nil ? "Sized inside the engine's VM; the VM disk file on your Mac isn't measured yet." : nil
+        var hostBytes: Int64?
         if let disk, FileManager.default.fileExists(atPath: disk) {
             let onMac = FileSizes.measure(disk).allocated
             let logical = ((try? FileManager.default.attributesOfItem(atPath: disk))?[.size] as? NSNumber)?.int64Value ?? 0
             let contents = usage.values.map(\.size).reduce(0, +)
-            note = "One VM disk file, Docker.raw: \(ByteFormat.string(logical)) logical, \(ByteFormat.string(onMac)) on disk."
-            if onMac > contents { facts.append(Fact(.dockerDiskSlack, onDisk: .bytes(onMac - contents))) }
-            for i in facts.indices { facts[i].path = ctx.expand("~/Library/Containers/com.docker.docker") }
+            note = "One VM disk file, Docker.raw: \(ByteFormat.string(logical)) logical, \(ByteFormat.string(onMac)) on disk. Items are sized inside it."
+            hostBytes = onMac
+            if onMac > contents { facts.append(Fact(.dockerDiskSlack, onDisk: .bytes(onMac - contents), path: dataFolder)) }
         }
-        return Owner(id: "docker-\(name.lowercased().replacingOccurrences(of: " ", with: "-"))", name: name, kind: .developerTools,
-                     location: disk.map { ctx.display(($0 as NSString).deletingLastPathComponent) } ?? "context \(context)", note: note,
+        return Owner(id: "docker:\(context)", name: name, kind: .developerTools,
+                     location: dataFolder.map(ctx.display) ?? "context \(context)", note: note, hostBytes: hostBytes,
                      items: facts.map(Rules.item))
     }
 }

@@ -37,7 +37,7 @@ struct OverviewView: View {
             Text("· \(formatBytes(s.disk.free)) free, plus \(formatBytes(s.disk.purgeable)) macOS can purge on its own").foregroundStyle(.tertiary)
             Spacer()
             if let f = model.history.forecast() {
-                Button("Full in about \(Int(f.daysUntilFull / 30)) months at this rate") { model.section = .history }.buttonStyle(.link)
+                Button(forecastText(f)) { model.section = .history }.buttonStyle(.link)
             }
         }
     }

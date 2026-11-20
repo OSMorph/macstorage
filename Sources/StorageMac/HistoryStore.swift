@@ -23,12 +23,27 @@ public struct HistoryStore: Sendable {
         try write(history, to: historyURL)
     }
 
-    /// Adds or replaces a cleanup run (a run is updated when items are later deleted from the Trash).
-    public func save(_ run: RunRecord) throws {
+    /// Adds or replaces a cleanup run (a run is updated when items are later deleted from the
+    /// Trash). The full receipt, with every target, is written as a text file; the history
+    /// keeps a compact copy so it stays small however large the target lists were.
+    @discardableResult
+    public func save(_ run: RunRecord) throws -> URL {
+        let receipt = try saveReceipt(run)
         var history = loadHistory()
         history.runs.removeAll { $0.id == run.id }
-        history.runs.insert(run, at: 0)
+        history.runs.insert(Self.compacted(run), at: 0)
         try write(history, to: historyURL)
+        return receipt
+    }
+
+    /// Keeps at most `limit` approved targets per step (the receipt file has them all).
+    /// Trash entries are kept in full: they're needed to delete them from the Trash later.
+    static func compacted(_ run: RunRecord, limit: Int = 200) -> RunRecord {
+        var run = run
+        for i in run.steps.indices where run.steps[i].step.approvedTargets.count > limit {
+            run.steps[i].step.approvedTargets = Array(run.steps[i].step.approvedTargets.prefix(limit))
+        }
+        return run
     }
 
     /// Writes a run's receipt as text and returns where.

@@ -34,6 +34,18 @@ final class RulesTests: XCTestCase {
     }
 }
 
+final class CompletenessTests: XCTestCase {
+    func testAnIncompleteListHandsFolderClearingToTheUser() {
+        var f = Fact(.goModuleCache, onDisk: .atLeast(10), targets: [Target("a")], root: "/r")
+        f.targetsComplete = false
+        let item = Rules.item(f)
+        XCTAssertFalse(item.isAutomaticCleanup)
+        XCTAssertFalse(item.targetsComplete)
+        XCTAssertEqual(item.onDisk.bytes, 10)
+        XCTAssertFalse(item.onDisk.isExact)
+    }
+}
+
 final class CommandTests: XCTestCase {
     func testDisplayShowsTheTargetCountAndPreviewTime() {
         let c = Command("docker", ["builder", "prune", "--filter", "until=\(Command.previewTimeToken)"])
@@ -60,23 +72,43 @@ final class AccountingTests: XCTestCase {
 
     func testUserRunItemsAreNotCounted() {
         let acc = Accounting(snapshot)
-        XCTAssertTrue(acc.userRunItems(tier: .safe).contains { $0.id == "pnpmStore" })
+        XCTAssertTrue(acc.userRunItems(tier: .safe).contains { $0.id == "node/pnpmStore" })
         let safe = acc.reclaimable(tier: .safe)
         XCTAssertFalse(safe.includesUpperBound, "pnpm's upper bound must not leak into the app's totals")
     }
 
     func testCleanedItemsLeaveTheTotals() {
         let before = Accounting(snapshot).reclaimable(tier: .safe)[.mac]
-        let after = Accounting(snapshot, cleaned: ["goModuleCache"]).reclaimable(tier: .safe)[.mac]
+        let after = Accounting(snapshot, cleaned: ["go/goModuleCache"]).reclaimable(tier: .safe)[.mac]
         XCTAssertEqual(before - after, Demo.gb(10.5))
-        XCTAssertEqual(Accounting(snapshot, cleaned: ["goModuleCache", "goBuildCache"]).reclaimableLabel(owner: snapshot.owner("go")!), .cleaned)
+        XCTAssertEqual(Accounting(snapshot, cleaned: ["go/goModuleCache", "go/goBuildCache"]).reclaimableLabel(owner: snapshot.owner("go")!), .cleaned)
     }
 
     func testReclaimableLabels() {
         let acc = Accounting(snapshot)
         XCTAssertEqual(acc.reclaimableLabel(owner: snapshot.owner("downloads")!), .unknown)
         XCTAssertEqual(acc.reclaimableLabel(owner: snapshot.owner("macos")!), .none)
-        guard case .bytes(_, true, _) = acc.reclaimableLabel(owner: snapshot.owner("docker")!) else { return XCTFail("Docker should be inside its disk") }
+        guard case .bytes(let r) = acc.reclaimableLabel(owner: snapshot.owner("docker")!), r[.containerDisk] > 0, r[.mac] == 0 else {
+            return XCTFail("Docker's savings are inside its disk and never added to the Mac's")
+        }
+    }
+
+    func testContainerEngineCountsItsVMDiskNotItsContents() {
+        XCTAssertEqual(snapshot.owner("docker")?.onDisk, Demo.gb(50.1))
+    }
+
+    func testItemIDsAreUniqueAcrossOwners() {
+        let a = Owner(id: "docker-a", name: "A", kind: .developerTools, location: "", items: [Rules.item(Fact(.dockerBuildCache, onDisk: .bytes(1)))])
+        let b = Owner(id: "docker-b", name: "B", kind: .developerTools, location: "", items: [Rules.item(Fact(.dockerBuildCache, onDisk: .bytes(1)))])
+        XCTAssertNotEqual(a.items[0].id, b.items[0].id)
+        let ids = Demo.snapshot().owners.flatMap(\.items).map(\.id)
+        XCTAssertEqual(ids.count, Set(ids).count)
+    }
+
+    func testDuplicateOwnerIDsDontCrashHistory() {
+        var s = snapshot
+        s.owners.append(s.owners[0])
+        XCTAssertEqual(ScanSummary(s).owners[s.owners[0].id], s.owners[0].onDisk * 2)
     }
 
     func testUnattributedExcludesOwnVolumes() {
@@ -89,61 +121,87 @@ final class CleanupPlanTests: XCTestCase {
     let snapshot = Demo.snapshot()
 
     func testOnlySelectedAutomaticItemsAndPickedFilesBecomeSteps() {
-        let picks = ["downloads": [Target("~/Downloads/Docker.dmg", bytes: 600_000_000)]]
-        let plan = CleanupPlan(snapshot: snapshot, selected: ["goBuildCache", "dockerUnusedVolumes", "pnpmStore"], picks: picks)
-        XCTAssertEqual(plan.steps.map(\.id), ["goBuildCache", "downloads"], "volumes and pnpm are never automatic")
+        let picks = ["downloads/downloads": [Target("~/Downloads/Docker.dmg", bytes: 600_000_000)]]
+        let plan = CleanupPlan(snapshot: snapshot, selected: ["go/goBuildCache", "docker/dockerUnusedVolumes", "node/pnpmStore"], picks: picks)
+        XCTAssertEqual(plan.steps.map(\.id), ["go/goBuildCache", "downloads/downloads"], "volumes and pnpm are never automatic")
         XCTAssertEqual(plan.pickedSteps.count, 1)
         XCTAssertEqual(plan.expected(.trash), 600_000_000)
     }
 
     func testPicksOutsideTheItemAreIgnored() {
-        let plan = CleanupPlan(snapshot: snapshot, selected: [], picks: ["downloads": [Target("/etc/passwd")]])
+        let plan = CleanupPlan(snapshot: snapshot, selected: [], picks: ["downloads/downloads": [Target("/etc/passwd")]])
         XCTAssertTrue(plan.steps.isEmpty)
     }
 
     func testStepsAreOrderedByTierAndSkipCleanedItems() {
-        let plan = CleanupPlan(snapshot: snapshot, selected: ["dockerUnusedImages", "nixDeadPaths", "goModuleCache"], picks: [:], cleaned: ["goModuleCache"])
+        let plan = CleanupPlan(snapshot: snapshot, selected: ["docker/dockerUnusedImages", "nix/nixDeadPaths", "go/goModuleCache"], picks: [:], cleaned: ["go/goModuleCache"])
         XCTAssertEqual(plan.steps.map(\.item.tier), [.safe, .probablySafe])
-        XCTAssertFalse(plan.steps.contains { $0.id == "goModuleCache" })
+        XCTAssertFalse(plan.steps.contains { $0.id == "go/goModuleCache" })
     }
 }
 
 final class RunRecordTests: XCTestCase {
     func makeRun() -> RunRecord {
         let s = Demo.snapshot()
-        let plan = CleanupPlan(snapshot: s, selected: ["goBuildCache", "dockerBuildCache"],
-                               picks: ["downloads": [Target("~/Downloads/Docker.dmg", bytes: 600_000_000)]])
+        let plan = CleanupPlan(snapshot: s, selected: ["go/goBuildCache", "docker/dockerBuildCache"],
+                               picks: ["downloads/downloads": [Target("~/Downloads/Docker.dmg")]])
         let steps = plan.steps.map { step -> RunRecord.StepResult in
             switch step.id {
-            case "goBuildCache": .init(step: step, outcome: .done(freedBytes: 3_000_000_000), executed: ["go clean -cache"])
-            case "dockerBuildCache": .init(step: step, outcome: .skipped(reason: "The target list changed since the preview."), executed: [])
-            default: .init(step: step, outcome: .notRun, executed: [])
+            case "go/goBuildCache": .init(step: step, outcome: .done(measured: 2_900_000_000), executed: ["go clean -cache"])
+            case "docker/dockerBuildCache": .init(step: step, outcome: .skipped(reason: "The list changed since the preview."))
+            default: .init(step: step, outcome: .notRun(reason: "Cleanup was stopped before this step."))
             }
         }
         return RunRecord(started: Demo.scanDate, finished: Demo.scanDate, steps: steps)
     }
 
-    func testFreedIsSplitAndSkipsCountNothing() {
+    func testFreedIsMeasuredAndSplitAndSkipsCountNothing() {
         let run = makeRun()
         XCTAssertEqual(run.doneCount, 1)
-        XCTAssertEqual(run.freed(.mac), 3_000_000_000)
+        XCTAssertEqual(run.freed(.mac), 2_900_000_000, "the re-measured figure, not the 3.0 GB prediction")
         XCTAssertEqual(run.freed(.containerDisk), 0)
-        XCTAssertTrue(run.movedToTrash.isEmpty, "the Downloads step didn't run")
+        XCTAssertTrue(run.trashed.isEmpty, "the Downloads step didn't run")
+    }
+
+    func testUnmeasuredStepsAreReportedAsPredictions() {
+        var run = makeRun()
+        run.steps[0].outcome = .done(measured: nil)
+        XCTAssertEqual(run.freed(.mac), 0)
+        XCTAssertEqual(run.unmeasured(.mac), Demo.gb(3))
+        XCTAssertTrue(Receipt.text(run).contains("predicted 3.0 GB, not re-measured"))
     }
 
     func testReceiptLeadsWithOutcomeAndSeparatesPlannedFromExecuted() {
         let text = Receipt.text(makeRun())
-        XCTAssertTrue(text.contains("DONE · Go · Build cache"))
+        XCTAssertTrue(text.contains("DONE · Go · Build cache · 2.9 GB freed, measured"))
         XCTAssertTrue(text.contains("SKIPPED · Docker Desktop · Build cache"))
-        XCTAssertTrue(text.contains("NOT RUN · Downloads"))
+        XCTAssertTrue(text.contains("NOT RUN · Downloads · Downloads folder · Cleanup was stopped before this step."))
         XCTAssertTrue(text.contains("Planned, not executed:\n    ~/Downloads/Docker.dmg"))
     }
 
-    func testTrashDeletionIsItsOwnEvent() {
+    func testPartialStepsKeepTheirProblemsAndStopTheRun() {
+        XCTAssertTrue(StepOutcome.partial(measured: 1, problems: ["x"]).stopsRun)
+        XCTAssertTrue(StepOutcome.failed(error: "x").stopsRun)
+        XCTAssertFalse(StepOutcome.skipped(reason: "x").stopsRun)
         var run = makeRun()
-        run.trashDeletions.append(.init(date: Demo.scanDate, paths: ["~/a"], bytes: 5, includedPickedFiles: false))
+        run.steps[0].outcome = .partial(measured: 5, problems: ["batch 2 of 3: path is alive"])
+        XCTAssertTrue(Receipt.text(run).contains("PARTLY DONE · Go · Build cache"))
+        XCTAssertTrue(Receipt.text(run).contains("Problem: batch 2 of 3: path is alive"))
+        XCTAssertTrue(Receipt.text(run).contains("Executed:\n    go clean -cache"))
+    }
+
+    func testTrashDeletionIsItsOwnEventAndOnlyCountsDeletedEntries() {
+        var run = makeRun()
+        let mine = TrashEntry(original: "~/Downloads/a.iso", landed: "/t/a.iso", identity: nil, bytes: 7, picked: true)
+        let cache = TrashEntry(original: "~/Library/Caches/x", landed: "/t/x", identity: nil, bytes: 5, picked: false)
+        run.steps[2] = .init(step: run.steps[2].step, outcome: .done(measured: 12), trashed: [cache, mine])
+        XCTAssertEqual(run.trashed.first, mine, "the user's own files come first")
+        run.trashDeletions.append(.init(date: Demo.scanDate, deleted: [cache], refused: ["/t/gone"]))
         XCTAssertEqual(run.deletedFromTrash, 5)
-        XCTAssertTrue(Receipt.text(run).contains("deleted 1 item (5 bytes) from the Trash permanently:\n    ~/a"))
+        XCTAssertEqual(run.stillInTrash, [mine])
+        let text = Receipt.text(run)
+        XCTAssertTrue(text.contains("deleted 1 item (5 bytes) from the Trash permanently:\n    ~/Library/Caches/x"))
+        XCTAssertTrue(text.contains("Refused (moved, replaced or restored since):\n    /t/gone"))
     }
 }
 
@@ -195,6 +253,19 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(r.targets.map(\.id).first, "/opt/homebrew/Library/Homebrew/vendor/portable-ruby/3.3.4_1")
         XCTAssertEqual(r.targets.first?.bytes, 33_600_000)
         XCTAssertEqual(r.total, 240_500_000)
+    }
+
+    func testBuildxRecordsKeepInUseRecordsApart() throws {
+        let records = Parse.buildxRecords(try fixture("buildx-du-verbose.txt"))
+        XCTAssertEqual(records.map(\.id), ["uv9usm2hguieiwuudzlmxwowm", "k2j3h4g5f6d7s8a9q0w1e2r3t"])
+        XCTAssertEqual(records.map(\.reclaimable), [true, false])
+        XCTAssertEqual(records[0].bytes, 996_700_000)
+    }
+
+    func testBrewPathsMayContainParentheses() {
+        let r = Parse.brewCleanup("Would remove: /Users/USER/Library/Caches/Homebrew/a (copy) (2).dmg (12.0MB)")
+        XCTAssertEqual(r.targets.first?.id, "/Users/USER/Library/Caches/Homebrew/a (copy) (2).dmg")
+        XCTAssertEqual(r.targets.first?.bytes, 12_000_000)
     }
 
     func testNixSizesAndPaths() {

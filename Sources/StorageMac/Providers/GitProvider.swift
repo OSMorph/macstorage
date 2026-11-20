@@ -10,6 +10,8 @@ public struct GitProvider: Provider {
                                     "Movies", ".venv", "venv", "target", ".build", "DerivedData", "vendor", "Pods", "Applications"]
     static let buildOutputNames = ["node_modules", ".next", "dist", "target", ".build", ".turbo"]
     static let inactiveAfter: TimeInterval = 90 * 86_400
+    /// The whole provider stops measuring after this and reports a partial result.
+    static let budget: Duration = .seconds(300)
 
     public init() {}
 
@@ -23,14 +25,17 @@ public struct GitProvider: Provider {
     }
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
-        guard ctx.shell.tools.url(for: "git") != nil else {
+        guard ctx.tools.isInstalled("git") else {
             return ProviderResult(coverage: [CoverageEntry(area: area, status: .skipped, detail: "git isn't available (Command Line Tools missing).")])
         }
         var checkouts: [Checkout] = []
-        for (path, isWorktree) in find(in: ctx.home, fullDiskAccess: ctx.fullDiskAccess) {
-            if Task.isCancelled { break }
+        let found = find(ctx)
+        let deadline = ContinuousClock.now + Self.budget
+        for (path, isWorktree) in found {
+            if Task.isCancelled || ContinuousClock.now > deadline { break }
             checkouts.append(await inspect(ctx, path, isWorktree: isWorktree))
         }
+        let partial = checkouts.count < found.count
         let inactive = Date().addingTimeInterval(-Self.inactiveAfter)
         let unsaved = checkouts.filter(\.hasUnsavedWork)
         let idle = checkouts.filter { !$0.hasUnsavedWork && $0.lastActivity < inactive }
@@ -48,18 +53,18 @@ public struct GitProvider: Provider {
         let owner = Owner(id: "git", name: "Git checkouts", kind: .developerTools, location: "\(plural(checkouts.count, "checkout")) in your home folder",
                           note: "\(plural(checkouts.count - worktrees, "repo")) and \(plural(worktrees, "worktree")). \(ByteFormat.string(allocated)) if shared blocks were counted per copy.",
                           items: facts.map(Rules.item))
-        return ProviderResult(owners: checkouts.isEmpty ? [] : [owner],
-                              coverage: [CoverageEntry(area: area, status: .measured, detail: "\(plural(checkouts.count, "checkout")) found.")])
+        let detail = partial ? "\(plural(found.count, "checkout")) found; \(checkouts.count) measured before the time limit." : "\(plural(checkouts.count, "checkout")) found."
+        return ProviderResult(owners: checkouts.isEmpty ? [] : [owner], coverage: [CoverageEntry(area: area, status: .measured, detail: detail)])
     }
 
     /// Finds checkouts (a `.git` folder) and worktrees (a `.git` file) up to seven levels deep.
-    func find(in home: String, fullDiskAccess: Bool) -> [(String, Bool)] {
-        guard let walker = FileManager.default.enumerator(at: URL(fileURLWithPath: home), includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
-        let protected: Set<String> = ["Desktop", "Documents", "Downloads"]
+    func find(_ ctx: ScanContext) -> [(String, Bool)] {
+        guard let walker = FileManager.default.enumerator(at: URL(fileURLWithPath: ctx.home), includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
+        let protected = ctx.protectedPaths
         var found: [(String, Bool)] = []
         while let url = walker.nextObject() as? URL {
             let name = url.lastPathComponent
-            if Self.skip.contains(name) || walker.level > 7 || (!fullDiskAccess && walker.level == 1 && protected.contains(name)) {
+            if Self.skip.contains(name) || walker.level > 7 || protected.contains(url.path) {
                 walker.skipDescendants(); continue
             }
             guard name == ".git" else { continue }
@@ -79,8 +84,8 @@ public struct GitProvider: Provider {
         let index = path + (isWorktree ? "/.git" : "/.git/index")
         let modified = (try? FileManager.default.attributesOfItem(atPath: index))?[.modificationDate] as? Date ?? .distantPast
         let build = Self.buildOutputNames.map { path + "/" + $0 }.filter { FileManager.default.fileExists(atPath: $0) }
-            .map { Target($0, bytes: FileSizes.measure($0, limit: .seconds(20)).privateBytes) }
+            .map { Target($0, bytes: FileSizes.measure($0, ctx.walk(limit: .seconds(20))).privateBytes, identity: FileSizes.identity($0)) }
         return Checkout(path: path, isWorktree: isWorktree, lastActivity: modified, hasUnsavedWork: unsaved,
-                        size: FileSizes.measure(path, limit: .seconds(30)), buildOutput: build)
+                        size: FileSizes.measure(path, ctx.walk(limit: .seconds(30))), buildOutput: build)
     }
 }

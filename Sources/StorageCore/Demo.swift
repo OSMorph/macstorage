@@ -18,8 +18,9 @@ public enum Demo {
     public static let scanDate = Date(timeIntervalSince1970: 1_795_000_000)
 
     public static func snapshot() -> Snapshot {
-        func owner(_ id: String, _ name: String, _ kind: OwnerKind, _ location: String, note: String? = nil, ownVolume: Bool = false, _ facts: [Fact]) -> Owner {
-            Owner(id: id, name: name, kind: kind, location: location, note: note, isOwnVolume: ownVolume, items: facts.map(Rules.item))
+        func owner(_ id: String, _ name: String, _ kind: OwnerKind, _ location: String, note: String? = nil, ownVolume: Bool = false,
+                   hostBytes: Int64? = nil, _ facts: [Fact]) -> Owner {
+            Owner(id: id, name: name, kind: kind, location: location, note: note, isOwnVolume: ownVolume, hostBytes: hostBytes, items: facts.map(Rules.item))
         }
         let pkgs = ["openssl", "python3", "nodejs", "go", "llvm", "git", "curl", "sqlite", "zlib", "cmake", "rustc", "ffmpeg"]
         let owners = [
@@ -35,11 +36,12 @@ public enum Demo {
                 Fact(.nixOldGenerations, onDisk: .notMeasured, reclaimable: .notMeasured, counts: ["generations": 34]),
                 Fact(.nixLive, onDisk: .bytes(gb(98))),
             ]),
-            owner("docker", "Docker Desktop", .developerTools, "~/Library/Containers/com.docker.docker", note: "One VM disk file, Docker.raw: 64 GB logical, 50.1 GB on disk.", [
-                Fact(.dockerBuildCache, onDisk: .bytes(gb(24.3)), reclaimable: .bytes(gb(21.5)), targets: list(737, { "cache record \(hex($0 + 1000, 12))" }, bytes: gb(21.5)), counts: ["records": 737]),
-                Fact(.dockerUnusedImages, onDisk: .bytes(gb(8.3)), reclaimable: .bytes(gb(7.5)), targets: list(23, { "image-\($0):old \(hex($0 + 2000, 12))" }, bytes: gb(7.5)), counts: ["unused": 23, "total": 44]),
-                Fact(.dockerStoppedContainers, onDisk: .bytes(110_000_000), targets: list(31, { "api-\($0 + 1)" }, bytes: 40_000_000), counts: ["stopped": 31, "total": 58]),
-                Fact(.dockerUnusedVolumes, onDisk: .bytes(gb(3)), targets: list(20, { "pgdata-\(hex($0 + 3000, 6))" }, bytes: gb(2.1)), counts: ["unused": 20, "total": 25]),
+            owner("docker", "Docker Desktop", .developerTools, "~/Library/Containers/com.docker.docker", note: "One VM disk file, Docker.raw: 64 GB logical, 50.1 GB on disk.",
+                  hostBytes: gb(50.1), [
+                Fact(.dockerBuildCache, onDisk: .bytes(gb(24.3)), reclaimable: .bytes(gb(21.5)), targets: list(737, { "cache record \(hex($0 + 1000, 12))" }, bytes: gb(21.5)), root: "desktop-linux", counts: ["records": 737]),
+                Fact(.dockerUnusedImages, onDisk: .bytes(gb(8.3)), reclaimable: .bytes(gb(7.5)), targets: list(23, { "image-\($0):old \(hex($0 + 2000, 12))" }, bytes: gb(7.5)), root: "desktop-linux", counts: ["unused": 23, "total": 44]),
+                Fact(.dockerStoppedContainers, onDisk: .bytes(110_000_000), targets: list(31, { "api-\($0 + 1)" }, bytes: 40_000_000), root: "desktop-linux", counts: ["stopped": 31, "total": 58]),
+                Fact(.dockerUnusedVolumes, onDisk: .bytes(gb(3)), targets: list(20, { "pgdata-\(hex($0 + 3000, 6))" }, bytes: gb(2.1)), root: "desktop-linux", counts: ["unused": 20, "total": 25]),
                 Fact(.dockerDiskSlack, onDisk: .bytes(gb(14.4))),
             ]),
             owner("slack", "Slack", .apps, "~/Library/Containers/com.tinyspeck.slackmacgap", [

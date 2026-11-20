@@ -64,8 +64,8 @@ public struct ScanSummary: Codable, Equatable, Sendable {
 
     public init(_ snapshot: Snapshot, events: [ScanEvent] = []) {
         self.init(date: snapshot.date, used: snapshot.disk.used, free: snapshot.disk.free,
-                  owners: Dictionary(uniqueKeysWithValues: snapshot.owners.map { ($0.id, $0.onDisk) }),
-                  names: Dictionary(uniqueKeysWithValues: snapshot.owners.map { ($0.id, $0.name) }), events: events)
+                  owners: Dictionary(snapshot.owners.map { ($0.id, $0.onDisk) }, uniquingKeysWith: +),
+                  names: Dictionary(snapshot.owners.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a }), events: events)
     }
 }
 

@@ -3,17 +3,35 @@ import StorageCore
 
 /// What every provider gets: a way to run tools and where things are.
 public struct ScanContext: Sendable {
-    public let shell: Shell
+    public let tools: any ToolRunning
     public let home: String
     public let fullDiskAccess: Bool
 
-    public func expand(_ path: String) -> String { path.replacingOccurrences(of: "~", with: home, options: .anchored) }
+    public init(tools: any ToolRunning, home: String = NSHomeDirectory(), fullDiskAccess: Bool) {
+        self.tools = tools
+        self.home = home
+        self.fullDiskAccess = fullDiskAccess
+    }
+
+    /// Folders macOS guards without Full Disk Access. Walks never enter them then, so the
+    /// scan can't trigger consent prompts or read what coverage says it skipped.
+    public static let protectedFolders = ["Desktop", "Documents", "Downloads", "Pictures", "Library/Mail", "Library/Messages",
+                                          "Library/Containers", "Library/Group Containers", "Library/Safari",
+                                          "Library/Mobile Documents", "Library/Application Support/MobileSync"]
+
+    public var protectedPaths: Set<String> { fullDiskAccess ? [] : Set(Self.protectedFolders.map { home + "/" + $0 }) }
+
+    public func walk(limit: Duration = .seconds(120), skipGitCheckouts: Bool = false) -> WalkOptions {
+        WalkOptions(excluding: protectedPaths, skipGitCheckouts: skipGitCheckouts, limit: limit)
+    }
+
+    public func expand(_ path: String) -> String { path.hasPrefix("~") ? home + path.dropFirst() : path }
     /// The path as shown to the user, with the home folder as `~`.
     public func display(_ path: String) -> String { path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path }
 
-    /// Runs a tool and returns its output when it succeeded.
+    /// Runs a tool and returns its output only when it exited cleanly with complete output.
     func output(_ tool: String, _ args: [String], timeout: Duration = .seconds(60)) async -> String? {
-        guard let out = try? await shell.run(tool, args, timeout: timeout), out.succeeded else { return nil }
+        guard let out = try? await tools.run(tool, args, timeout: timeout), out.succeeded else { return nil }
         return out.stdout
     }
 
@@ -59,9 +77,8 @@ public struct Scanner: Sendable {
         XcodeProvider(), LibraryProvider(), PersonalFilesProvider(), GitProvider(),
     ]
 
-    public func scan(fullDiskAccess: Bool, progress: @Sendable (ScanProgress) -> Void = { _ in }) async -> Snapshot {
+    public func scan(_ context: ScanContext, progress: @Sendable (ScanProgress) -> Void = { _ in }) async -> Snapshot {
         let started = Date()
-        let context = ScanContext(shell: Shell(tools: await ToolLocator.discover()), home: NSHomeDirectory(), fullDiskAccess: fullDiskAccess)
         var owners: [Owner] = []
         var coverage: [CoverageEntry] = []
         var finished: [String] = []
@@ -81,40 +98,43 @@ public struct Scanner: Sendable {
                 progress(ScanProgress(finished: finished, running: providers.map(\.area).filter { !finished.contains($0) }, total: providers.count))
             }
         }
-        if !fullDiskAccess {
+        if !context.fullDiskAccess {
             coverage.append(CoverageEntry(area: "Full Disk Access", status: .noAccess,
                                           detail: "Off. Downloads, Documents, Desktop, Mail, Messages and other apps' data were skipped; their space is part of \"Not attributed yet\". Turn it on in System Settings → Privacy & Security → Full Disk Access."))
         }
-        let disk = SystemProvider.diskUsage()
-        return Snapshot(date: started, scanDuration: Date().timeIntervalSince(started), disk: disk,
+        return Snapshot(date: started, scanDuration: Date().timeIntervalSince(started), disk: SystemProvider.diskUsage(),
                         owners: owners.filter { $0.onDisk > 0 || $0.items.contains { $0.onDisk == .notMeasured } }.sorted { $0.onDisk > $1.onDisk },
                         coverage: coverage.sorted { $0.area < $1.area },
-                        folders: FolderAttribution.folders(home: context.home, owners: owners, fullDiskAccess: fullDiskAccess))
+                        folders: FolderAttribution.folders(context, owners: owners))
     }
 }
 
 /// The By folder view: sizes of the home folder and Library, with which owners hold space in each.
 enum FolderAttribution {
-    static let protected: Set<String> = ["Desktop", "Documents", "Downloads", "Pictures", "Group Containers", "Containers", "Mail", "Messages"]
-
-    static func folders(home: String, owners: [Owner], fullDiskAccess: Bool) -> [String: [FolderEntry]] {
+    static func folders(_ ctx: ScanContext, owners: [Owner]) -> [String: [FolderEntry]] {
         var result: [String: [FolderEntry]] = [:]
-        for (key, path) in [("~", home), ("~/Library", home + "/Library")] {
-            result[key] = FileSizes.children(of: path, limit: .seconds(30)).compactMap { name, size in
-                guard size.allocated > 0 || protected.contains(name) else { return nil }
-                if !fullDiskAccess, protected.contains(name) {
-                    return FolderEntry(name: name, bytes: nil, kind: .personalFiles)
-                }
+        for (key, path) in [("~", ctx.home), ("~/Library", ctx.home + "/Library")] {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+            result[key] = names.compactMap { name -> FolderEntry? in
                 let full = path + "/" + name
+                if ctx.protectedPaths.contains(full) { return FolderEntry(name: name, bytes: nil, kind: .personalFiles) }
+                let size = FileSizes.measure(full, ctx.walk(limit: .seconds(30)))
+                guard size.allocated > 0 else { return nil }
                 let shares = owners.compactMap { o -> OwnerShare? in
-                    let bytes = o.items.filter { ($0.path ?? "").hasPrefix(full) }.compactMap(\.onDisk.bytes).reduce(0, +)
+                    let bytes = o.items.filter { Self.isInside($0.path, full) }.compactMap(\.onDisk.bytes).reduce(0, +)
                     return bytes > 0 ? OwnerShare(ownerID: o.id, bytes: bytes) : nil
                 }.sorted { $0.bytes > $1.bytes }
                 let kind = shares.first.flatMap { s in owners.first { $0.id == s.ownerID }?.kind } ?? .personalFiles
-                return FolderEntry(name: name, bytes: size.allocated, kind: kind, isPartial: !size.complete || size.unreadable > 0,
+                return FolderEntry(name: name, bytes: size.allocated, kind: kind, isPartial: !size.isComplete,
                                    owners: shares, hasChildren: key == "~" && name == "Library")
-            }
+            }.sorted { ($0.bytes ?? 0) > ($1.bytes ?? 0) }
         }
         return result
+    }
+
+    /// True when `path` is `folder` or inside it, matching whole path components.
+    static func isInside(_ path: String?, _ folder: String) -> Bool {
+        guard let path else { return false }
+        return path == folder || path.hasPrefix(folder + "/")
     }
 }

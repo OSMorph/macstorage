@@ -50,6 +50,23 @@ struct TierBadge: View {
 
 func formatBytes(_ b: Int64) -> String { ByteFormat.string(b) }
 
+extension Destination {
+    /// Short tag next to a number, so destinations stay distinguishable without adding them up.
+    var shortLabel: String {
+        switch self {
+        case .mac: "now"
+        case .trash: "via Trash"
+        case .containerDisk: "in Docker's disk"
+        }
+    }
+}
+
+/// "Full in about 10 months", or days when it's closer than a month.
+func forecastText(_ f: Forecast) -> String {
+    f.daysUntilFull < 45 ? "Full in about \(plural(max(1, Int(f.daysUntilFull)), "day")) at this rate"
+        : "Full in about \(plural(Int((f.daysUntilFull / 30).rounded()), "month")) at this rate"
+}
+
 /// A size that may be unknown: never collapses to a dash.
 struct MeasureText: View {
     let measure: Measure
@@ -58,6 +75,7 @@ struct MeasureText: View {
     var body: some View {
         switch measure {
         case .bytes(let b): Text(formatBytes(b)).monospacedDigit()
+        case .atLeast(let b): Text("≥ " + formatBytes(b)).monospacedDigit().help("At least: the scan stopped early or some folders couldn't be read.")
         case .notMeasured: Text("Not measured").foregroundStyle(.secondary)
         case .unknown: Text(unknown).foregroundStyle(.secondary)
         }
@@ -69,10 +87,15 @@ struct ReclaimableText: View {
 
     var body: some View {
         switch label {
-        case .bytes(let b, let inDocker, let bound):
-            HStack(spacing: 4) {
-                Text((bound ? "≤ " : "") + formatBytes(b)).monospacedDigit()
-                if inDocker { Text("in Docker's disk").font(.caption2).foregroundStyle(.secondary) }
+        case .bytes(let r):
+            // Never added together: each destination is its own figure.
+            HStack(spacing: 6) {
+                ForEach(Destination.allCases.filter { r[$0] > 0 }, id: \.self) { d in
+                    HStack(spacing: 2) {
+                        Text((r.includesUpperBound ? "≤ " : "") + formatBytes(r[d])).monospacedDigit()
+                        Text(d.shortLabel).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
             }
         case .unknown: Text("Unknown").foregroundStyle(.secondary)
         case .cleaned: Text("Cleaned today").foregroundStyle(.secondary)

@@ -1,0 +1,22 @@
+ID:		uv9usm2hguieiwuudzlmxwowm
+Parent:		x1
+Created at:	2026-10-01 10:00:00 +0000 UTC
+Mutable:	false
+Reclaimable:	true
+Shared:		false
+Size:		996.7MB
+Description:	[stage-1 2/5] RUN npm ci
+Usage count:	2
+Last used:	3 weeks ago
+Type:		regular
+
+ID:		k2j3h4g5f6d7s8a9q0w1e2r3t
+Created at:	2026-11-20 09:00:00 +0000 UTC
+Mutable:	true
+Reclaimable:	false
+Shared:		false
+Size:		12.3MB
+Description:	mount / from exec /bin/sh -c go build
+Usage count:	1
+Last used:	Less than a second ago
+Type:		exec.cachemount

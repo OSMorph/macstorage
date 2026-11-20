@@ -66,14 +66,22 @@ public enum Destination: String, Codable, CaseIterable, Sendable {
 /// A size that may not be known. Never collapse these into 0 or a dash in the UI.
 public enum Measure: Codable, Equatable, Sendable {
     case bytes(Int64)
+    /// A lower bound: the walk stopped early or some folders couldn't be read.
+    case atLeast(Int64)
     /// Measuring it is possible but hasn't been done (it's slow, or the user hasn't asked).
     case notMeasured
     /// It can't be known in advance (it depends on what the user decides).
     case unknown
 
+    /// The known bytes, including a lower bound. Use `isExact` before presenting it as exact.
     public var bytes: Int64? {
-        if case .bytes(let b) = self { b } else { nil }
+        switch self {
+        case .bytes(let b), .atLeast(let b): b
+        case .notMeasured, .unknown: nil
+        }
     }
+
+    public var isExact: Bool { if case .bytes = self { true } else { false } }
 }
 
 /// A command the app runs itself: an executable and its arguments, never a shell string.
@@ -147,16 +155,36 @@ public enum Action: Codable, Equatable, Sendable {
 public struct Target: Codable, Equatable, Hashable, Sendable {
     public var id: String
     public var bytes: Int64?
+    /// For files and folders: what the scan saw, so the app can refuse to act if the
+    /// path now points at something else or has changed since.
+    public var identity: FileIdentity?
 
-    public init(_ id: String, bytes: Int64? = nil) {
+    public init(_ id: String, bytes: Int64? = nil, identity: FileIdentity? = nil) {
         self.id = id
         self.bytes = bytes
+        self.identity = identity
+    }
+}
+
+/// Identifies one filesystem object: the same path holding a different or modified object
+/// has a different identity.
+public struct FileIdentity: Codable, Equatable, Hashable, Sendable {
+    public var device: Int64
+    public var inode: UInt64
+    public var modified: Double
+
+    public init(device: Int64, inode: UInt64, modified: Double) {
+        self.device = device
+        self.inode = inode
+        self.modified = modified
     }
 }
 
 /// Something an owner holds, with its sizes, recommendation and action.
 public struct Item: Codable, Identifiable, Equatable, Sendable {
+    /// Unique across the snapshot: the owner's ID, then the rule kind and key.
     public var id: String
+    public var kind: ItemKind
     public var name: String
     /// On disk, counting blocks shared with other files (APFS clones, hard links) once.
     public var onDisk: Measure
@@ -176,14 +204,20 @@ public struct Item: Codable, Identifiable, Equatable, Sendable {
     public var targets: [Target]
     /// The word for one target in counts ("store path", "image").
     public var targetUnit: String
+    /// False when the list is known to be incomplete (time limit, unreadable folders).
+    public var targetsComplete: Bool
     /// The folder the item lives in, for Reveal in Finder and folder attribution.
     public var path: String?
+    /// For app caches: the app that must not be running while its cache is trashed.
+    public var appBundleID: String?
 
-    public init(id: String, name: String, onDisk: Measure, sharedBytes: Int64? = nil,
+    public init(id: String, kind: ItemKind, name: String, onDisk: Measure, sharedBytes: Int64? = nil,
                 reclaimable: Measure, reclaimableIsUpperBound: Bool = false, tier: Tier,
                 explanation: String, basis: String? = nil, action: Action = .none,
-                targets: [Target] = [], targetUnit: String = "item", path: String? = nil) {
+                targets: [Target] = [], targetUnit: String = "item", targetsComplete: Bool = true,
+                path: String? = nil, appBundleID: String? = nil) {
         self.id = id
+        self.kind = kind
         self.name = name
         self.onDisk = onDisk
         self.sharedBytes = sharedBytes
@@ -195,7 +229,9 @@ public struct Item: Codable, Identifiable, Equatable, Sendable {
         self.action = action
         self.targets = targets
         self.targetUnit = targetUnit
+        self.targetsComplete = targetsComplete
         self.path = path
+        self.appBundleID = appBundleID
     }
 
     /// The app may include this item in a cleanup run without the user picking files.
@@ -213,18 +249,27 @@ public struct Owner: Codable, Identifiable, Equatable, Sendable {
     public var note: String?
     /// True when the owner's space is on another volume than the Data volume (Nix, macOS).
     public var isOwnVolume: Bool
+    /// What the owner occupies on the Mac when that differs from the sum of its items:
+    /// a container engine's VM disk, whose items are sized inside the VM.
+    public var hostBytes: Int64?
     public var items: [Item]
 
+    /// Item IDs are namespaced with the owner's ID, so two engines or apps never share one.
     public init(id: String, name: String, kind: OwnerKind, location: String, note: String? = nil,
-                isOwnVolume: Bool = false, items: [Item]) {
+                isOwnVolume: Bool = false, hostBytes: Int64? = nil, items: [Item]) {
         self.id = id
         self.name = name
         self.kind = kind
         self.location = location
         self.note = note
         self.isOwnVolume = isOwnVolume
-        self.items = items
+        self.hostBytes = hostBytes
+        self.items = items.map { item in
+            var item = item
+            if !item.id.hasPrefix(id + "/") { item.id = id + "/" + item.id }
+            return item
+        }
     }
 
-    public var onDisk: Int64 { items.compactMap(\.onDisk.bytes).reduce(0, +) }
+    public var onDisk: Int64 { hostBytes ?? items.compactMap(\.onDisk.bytes).reduce(0, +) }
 }

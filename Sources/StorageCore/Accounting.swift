@@ -58,11 +58,11 @@ public struct Accounting: Sendable {
         return r
     }
 
-    /// How an owner's reclaimable column reads: a size, "Unknown", "0 bytes" or "Cleaned today".
+    /// How an owner's reclaimable column reads: sizes per destination (never added up),
+    /// "Unknown", "0 bytes" or "Cleaned today".
     public func reclaimableLabel(owner: Owner) -> ReclaimableLabel {
         let r = reclaimable(owner: owner)
-        let total = r.byDestination.values.reduce(0, +)
-        if total > 0 { return .bytes(total, insideContainerDisk: r[.containerDisk] > 0, upperBound: r.includesUpperBound) }
+        if r.byDestination.values.contains(where: { $0 > 0 }) { return .bytes(r) }
         if owner.items.contains(where: { cleaned.contains($0.id) }) { return .cleaned }
         let undecided = owner.items.contains { $0.reclaimable == .unknown && $0.tier != .leaveAlone && $0.tier != .notRemovable }
         return undecided ? .unknown : .none
@@ -78,7 +78,7 @@ public struct Accounting: Sendable {
 }
 
 public enum ReclaimableLabel: Equatable, Sendable {
-    case bytes(Int64, insideContainerDisk: Bool, upperBound: Bool)
+    case bytes(Reclaimable)
     case unknown
     case cleaned
     case none

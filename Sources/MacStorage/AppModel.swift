@@ -41,10 +41,13 @@ enum SheetPhase: Equatable {
 @MainActor @Observable
 final class AppModel {
     let demo: Bool
-    var snapshot: Snapshot?
-    var history = History()
-    /// Items cleaned since the snapshot: excluded from totals and Cleanup, marked in By owner.
-    var cleaned: [String: UUID] = [:]
+    private(set) var snapshot: Snapshot?
+    private(set) var history = History()
+    /// Items cleaned since the snapshot, with the run that cleaned them. Excluded from
+    /// totals and Cleanup, marked in By owner. Survives relaunches (derived from History).
+    private(set) var cleaned: [String: UUID] = [:]
+    /// Entries of pickable items that have already gone to the Trash.
+    private(set) var removedPicks: [String: Set<String>] = [:]
 
     var section: AppSection = .overview
     var selectedOwnerID: String?
@@ -52,19 +55,22 @@ final class AppModel {
     var folderPath = "~"
     var selectedFolder: String?
     var search = ""
-    /// A run History should open and focus (from an item's "View its receipt").
+    /// A run History should open (from "View its receipt" or the results).
     var openRunID: UUID?
 
     /// Automatic items ticked in Cleanup, and the entries picked for Review items.
     var selected: Set<String> = []
     var picks: [String: Set<String>] = [:]
 
-    var scanning: ScanProgress?
+    private(set) var scanning: ScanProgress?
     var sheet: SheetPhase?
-    var fullDiskAccess = FullDiskAccess.isGranted
+    /// Set when saving a run record failed, so the results can say so and offer a retry.
+    private(set) var saveError: String?
+    private(set) var fullDiskAccess = FullDiskAccess.isGranted
 
     private var scanTask: Task<Void, Never>?
     private var stopSignal = StopSignal()
+    private var tools: ToolLocator?
     private let store = HistoryStore()
 
     init(demo: Bool) {
@@ -81,22 +87,44 @@ final class AppModel {
     private func load(_ snapshot: Snapshot, history: History) {
         self.snapshot = snapshot
         self.history = history
+        // Runs after this snapshot already removed some of its items.
         cleaned = [:]
-        selected = Set(snapshot.owners.flatMap(\.items).filter { $0.tier == .safe && $0.isAutomaticCleanup }.map(\.id))
+        removedPicks = [:]
+        for run in history.runs where run.started > snapshot.date {
+            for r in run.steps where r.outcome.didRun { record(r, run: run.id) }
+        }
+        selected = Set(snapshot.owners.flatMap(\.items).filter { $0.tier == .safe && $0.isAutomaticCleanup && cleaned[$0.id] == nil }.map(\.id))
+    }
+
+    private func record(_ r: RunRecord.StepResult, run: UUID) {
+        if r.step.item.action == .pickToTrash {
+            removedPicks[r.step.item.id, default: []].formUnion(r.trashed.map(\.original))
+            picks[r.step.item.id] = nil
+        } else {
+            cleaned[r.step.item.id] = run
+            selected.remove(r.step.item.id)
+        }
+    }
+
+    private func locator() async -> ToolLocator {
+        if let tools { return tools }
+        let found = await ToolLocator.discover()
+        tools = found
+        return found
     }
 
     // MARK: Scanning
 
     func scan() {
-        guard scanning == nil else { return }
+        guard scanning == nil, !demo else { return }
         fullDiskAccess = FullDiskAccess.isGranted
-        if demo { return }
         scanning = ScanProgress(finished: [], running: [], total: Scanner.standardProviders.count)
         let fda = fullDiskAccess
         scanTask = Task {
-            let result = await Scanner().scan(fullDiskAccess: fda) { p in Task { @MainActor in self.scanning = p } }
+            let context = ScanContext(tools: Shell(tools: await locator()), fullDiskAccess: fda)
+            let result = await Scanner().scan(context) { p in Task { @MainActor in self.scanning = p } }
             guard !Task.isCancelled else { return }
-            try? store.save(result)
+            do { try store.save(result) } catch { saveError = "The scan couldn't be saved: \(error.localizedDescription)" }
             load(result, history: store.loadHistory())
             scanning = nil
         }
@@ -115,6 +143,12 @@ final class AppModel {
         return CleanupPlan(snapshot: snapshot, selected: selected, picks: picked, cleaned: Set(cleaned.keys))
     }
 
+    /// The sidebar badge: ticked automatic items plus Review items with picks. Cheap enough
+    /// to compute on every render, unlike building the plan.
+    var cleanupCount: Int {
+        selected.filter { cleaned[$0] == nil }.count + picks.values.filter { !$0.isEmpty }.count
+    }
+
     func openPreview() {
         guard let plan = plan(), !plan.steps.isEmpty else { return }
         sheet = .preview(plan)
@@ -125,12 +159,12 @@ final class AppModel {
         sheet = .running(plan, current: 0, outcomes: Array(repeating: nil, count: plan.steps.count))
         let stop = stopSignal
         Task {
+            let report: @Sendable (Int, StepOutcome?) -> Void = { i, o in Task { @MainActor in self.progress(i, o) } }
             let record: RunRecord
             if demo {
-                record = await DemoExecutor.run(plan, stop: stop) { i, o in Task { @MainActor in self.progress(i, o) } }
+                record = await DemoExecutor.run(plan, stop: stop, progress: report)
             } else {
-                let executor = CleanupExecutor(shell: Shell(tools: await ToolLocator.discover()))
-                record = await executor.run(plan, stop: stop) { i, o in Task { @MainActor in self.progress(i, o) } }
+                record = await CleanupExecutor(tools: Shell(tools: await locator())).run(plan, stop: stop, progress: report)
             }
             finish(record)
         }
@@ -145,39 +179,37 @@ final class AppModel {
     func stopRun() { stopSignal.stop() }
 
     /// Records the run before showing results, so no way of closing the sheet loses it.
-    private func finish(_ record: RunRecord) {
-        for r in record.steps where r.outcome.didRun {
-            if r.step.item.action == .pickToTrash {
-                picks[r.step.item.id] = nil
-                removedPicks[r.step.item.id, default: []].formUnion(r.step.approvedTargets.map(\.id))
-            } else {
-                cleaned[r.step.item.id] = record.id
-                selected.remove(r.step.item.id)
-            }
-        }
-        history.runs.insert(record, at: 0)
-        if !demo { try? store.save(record) }
-        sheet = .results(record)
+    private func finish(_ run: RunRecord) {
+        for r in run.steps where r.outcome.didRun { record(r, run: run.id) }
+        history.runs.insert(run, at: 0)
+        persist(run)
+        sheet = .results(run)
     }
 
-    /// Entries already moved to the Trash: no longer offered in pickers.
-    var removedPicks: [String: Set<String>] = [:]
+    func persist(_ run: RunRecord) {
+        guard !demo else { return }
+        do {
+            try store.save(run)
+            saveError = nil
+        } catch {
+            saveError = "This cleanup's record couldn't be saved (\(error.localizedDescription)). The cleanup itself is done."
+        }
+    }
 
     func deleteFromTrash(_ run: RunRecord, includePicked: Bool) {
-        let chosen = run.steps.filter { $0.outcome.didRun && $0.step.destination == .trash && (includePicked || $0.step.item.tier != .review) }
-        let locations = chosen.flatMap(\.trashLocations)
-        let deleted = Set(demo ? locations : CleanupExecutor.deleteFromTrash(locations))
-        let gone = chosen.filter { !Set($0.trashLocations).isDisjoint(with: deleted) }
+        let chosen = run.stillInTrash.filter { includePicked || !$0.picked }
+        let (deleted, refused) = demo ? (chosen, []) : CleanupExecutor.deleteFromTrash(chosen)
         var updated = run
-        updated.trashDeletions.append(.init(date: .now, paths: gone.flatMap(\.executed), bytes: gone.compactMap {
-            if case .done(let b) = $0.outcome { b } else { nil }
-        }.reduce(0, +), includedPickedFiles: gone.contains { $0.step.item.tier == .review }))
+        updated.trashDeletions.append(.init(date: .now, deleted: deleted, refused: refused))
         if let i = history.runs.firstIndex(where: { $0.id == run.id }) { history.runs[i] = updated }
-        if !demo { try? store.save(updated) }
+        persist(updated)
         sheet = .results(updated)
     }
 
-    func saveReceipt(_ run: RunRecord) -> URL? { demo ? nil : try? store.saveReceipt(run) }
+    func receiptURL(_ run: RunRecord) -> URL? {
+        guard !demo else { return nil }
+        return try? store.saveReceipt(run)
+    }
 
     // MARK: Navigation
 
@@ -187,7 +219,8 @@ final class AppModel {
         selectedItemID = item ?? snapshot?.owner(id)?.items.first { $0.tier != .leaveAlone && $0.tier != .notRemovable }?.id
     }
 
-    var cleanupCount: Int { plan()?.steps.count ?? 0 }
+    /// For the automated screenshot tour: show the welcome screen without data.
+    func setSnapshot(_ s: Snapshot?) { snapshot = s }
 }
 
 enum FullDiskAccess {
@@ -197,34 +230,34 @@ enum FullDiskAccess {
     }
 
     static func openSettings() {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") { NSWorkspace.shared.open(url) }
     }
 }
 
-/// Simulates a run in demo mode: nothing is touched. The first time Docker images are
-/// included, the re-check finds a changed list and skips them, to show that path.
+/// Simulates a run in demo mode: nothing is touched. Docker images are skipped as if the
+/// re-check found a changed list, to show that path.
 enum DemoExecutor {
     static func run(_ plan: CleanupPlan, stop: StopSignal, progress: @Sendable @escaping (Int, StepOutcome?) -> Void) async -> RunRecord {
         var results: [RunRecord.StepResult] = []
         for (i, step) in plan.steps.enumerated() {
-            if stop.isStopped { results.append(.init(step: step, outcome: .notRun)); continue }
+            if stop.isStopped { results.append(.init(step: step, outcome: .notRun(reason: "Cleanup was stopped before this step."))); continue }
             progress(i, nil)
             try? await Task.sleep(for: .milliseconds(350))
-            let outcome: StepOutcome = step.id == "dockerUnusedImages"
-                ? .skipped(reason: "A container started after the preview uses one of these images, so the list no longer matches what you approved.")
-                : .done(freedBytes: step.expectedBytes)
-            let executed = step.destination == .trash ? step.approvedTargets.map(\.id) : [demoCommand(step)]
-            results.append(.init(step: step, outcome: outcome, executed: outcome.didRun ? executed : [],
-                                 trashLocations: step.destination == .trash ? step.approvedTargets.map { "~/.Trash/" + ($0.id as NSString).lastPathComponent } : []))
-            progress(i, outcome)
+            let result: RunRecord.StepResult
+            if step.item.kind == .dockerUnusedImages {
+                result = .init(step: step, outcome: .skipped(reason: "A container started after the preview uses one of these images, so the list no longer matches what you approved."))
+            } else if step.destination == .trash {
+                let moved = step.approvedTargets.map { TrashEntry(original: $0.id, landed: "~/.Trash/" + ($0.id as NSString).lastPathComponent,
+                                                                  identity: nil, bytes: $0.bytes ?? 0, picked: step.item.tier == .review) }
+                result = .init(step: step, outcome: .done(measured: moved.map(\.bytes).reduce(0, +)), trashed: moved)
+            } else {
+                let command = CleanupExecutor.command(of: step.item)?.display(targets: step.approvedTargets.count, unit: step.item.targetUnit) ?? step.item.name
+                // Re-measuring usually finds a little less than predicted.
+                result = .init(step: step, outcome: .done(measured: step.expectedBytes * 97 / 100), executed: [command])
+            }
+            results.append(result)
+            progress(i, result.outcome)
         }
         return RunRecord(started: .now, finished: .now, steps: results)
-    }
-
-    static func demoCommand(_ step: CleanupStep) -> String {
-        switch step.item.action {
-        case .runOnTargets(let c, _), .runAfterRecheck(let c, _), .clearFolder(let c, _, _): c.display(targets: step.approvedTargets.count, unit: step.item.targetUnit)
-        default: step.item.name
-        }
     }
 }

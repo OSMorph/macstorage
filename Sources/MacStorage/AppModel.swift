@@ -261,7 +261,8 @@ enum DemoExecutor {
                                                                   identity: nil, bytes: $0.bytes ?? 0, picked: step.item.tier == .review) }
                 result = .init(step: step, outcome: .done(measured: moved.map(\.bytes).reduce(0, +)), trashed: moved)
             } else {
-                let command = CleanupExecutor.command(of: step.item)?.display(targets: step.approvedTargets.count, unit: step.item.targetUnit) ?? step.item.name
+                let listsTargets = if case .runOnTargets = step.item.action { true } else { false }
+                let command = CleanupExecutor.command(of: step.item).map { listsTargets ? $0.display(targets: step.approvedTargets.count, unit: step.item.targetUnit) : $0.display() } ?? step.item.name
                 // Re-measuring usually finds a little less than predicted.
                 result = .init(step: step, outcome: .done(measured: step.expectedBytes * 97 / 100), executed: [command])
             }

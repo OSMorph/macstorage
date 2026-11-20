@@ -276,7 +276,8 @@ struct CleanupView: View {
 
     private func commandText(_ item: Item) -> String {
         switch item.action {
-        case .runOnTargets(let c, _), .runAfterRecheck(let c, _): c.display(targets: item.targets.count, unit: item.targetUnit)
+        case .runOnTargets(let c, _): c.display(targets: item.targets.count, unit: item.targetUnit)
+        case .runAfterRecheck(let c, _): c.display()
         case .clearFolder(let c, _, _): c.display()
         case .moveToTrash: "Move to Trash: \(plural(item.targets.count, item.targetUnit))"
         default: ""

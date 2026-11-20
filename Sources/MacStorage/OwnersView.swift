@@ -195,8 +195,11 @@ struct ActionBox: View {
 
     var body: some View {
         switch item.action {
-        case .runOnTargets(let c, _), .runAfterRecheck(let c, _):
+        case .runOnTargets(let c, _):
             command("When you run cleanup, the app runs:", c.display(targets: item.targets.count, unit: item.targetUnit))
+        case .runAfterRecheck(let c, _):
+            command("When you run cleanup, the app runs:", c.display())
+            Text("Only if a fresh listing still matches the \(plural(item.targets.count, item.targetUnit)) below.").font(.caption).foregroundStyle(.secondary)
         case .clearFolder(let c, let root, _):
             command("When you run cleanup, the app runs:", c.display())
             Text("Resolved: \(root)").font(.caption).foregroundStyle(.secondary)

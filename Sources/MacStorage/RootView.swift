@@ -34,6 +34,7 @@ struct RootView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
+            .background(Color(nsColor: .windowBackgroundColor))
             .navigationTitle(model.snapshot == nil ? "Welcome" : model.section.title)
             .navigationSubtitle(statusText)
             .toolbar {

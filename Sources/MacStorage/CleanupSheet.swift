@@ -99,7 +99,8 @@ struct StepPreview: View {
 
     private var commandLine: String {
         switch step.item.action {
-        case .runOnTargets(let c, _), .runAfterRecheck(let c, _): c.display(targets: step.approvedTargets.count, unit: step.item.targetUnit)
+        case .runOnTargets(let c, _): c.display(targets: step.approvedTargets.count, unit: step.item.targetUnit)
+        case .runAfterRecheck(let c, _): c.display() + "\n# only if a fresh listing matches the \(plural(step.approvedTargets.count, step.item.targetUnit)) below"
         case .clearFolder(let c, _, _): c.display()
         default: "Move \(plural(step.approvedTargets.count, step.item.targetUnit)) to the Trash"
         }

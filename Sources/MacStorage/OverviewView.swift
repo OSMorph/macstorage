@@ -132,8 +132,8 @@ struct OwnerRanking: View {
     @State private var selection: Owner.ID?
 
     var body: some View {
-        let top = Array(snapshot.owners.prefix(12))
-        let maxValue = Double(top.first?.onDisk ?? 1)
+        let top = Array(snapshot.owners.sorted { $0.onDisk > $1.onDisk }.prefix(12))
+        let maxValue = Double(max(top.first?.onDisk ?? 1, 1))
         Table(top, selection: $selection) {
             TableColumn("Owner") { o in
                 Label { Text(o.name) } icon: { RoundedRectangle(cornerRadius: 2).fill(o.kind.color).frame(width: 8, height: 8) }

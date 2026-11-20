@@ -1,6 +1,6 @@
 # macstorage: plan
 
-Status: **M0 done on an unmanaged Mac; next is the UI/UX design.** Checking the release on a managed (MDM) Mac is deferred until the app is worth installing there. Personal project, shared publicly with no support commitment (see "Repository").
+Status: **M0 done; M1 (UI/UX design) reviewed over five rounds; first implementation in progress on the `app` branch.** Checking the release on a managed (MDM) Mac is deferred until the app is worth installing there. Personal project, shared publicly with no support commitment (see "Repository").
 
 ## Goal
 
@@ -163,6 +163,15 @@ Result: an updated plan with the paths, commands and distribution option confirm
 - **Anonymizing:** the first report exposed a scrubber bug (home paths weren't anonymized when the account's full name contained the username). It's fixed, with regression tests, before any report becomes a fixture.
 
 **M1: UI/UX design.** An interactive HTML mockup of every main view, filled with real (anonymized) numbers from M0, iterated until the layout and wording are right. No Swift until it's agreed.
+
+**What M1 settled** (five review rounds by independent reviewers who drove an interactive mockup in a browser; the decisions below are binding for the implementation):
+- **Exact consent.** Every step the app runs is bound to a list the user can inspect, filter, show in full and export. Where the tool takes a list, the app passes exactly the approved targets (`nix-store --delete <paths>`, `docker image rm <IDs>`). Where it can't, the app binds the scope another way and says how: clear-folder commands check the tool still resolves the reviewed folder; Docker's build cache uses `--filter until=<preview time>` plus a re-listing; Homebrew repeats its dry run. Steps that can't be bound (pnpm store prune) and irreversible deletes (Docker volumes, stopped containers) are handed to the user as a copyable command.
+- **Personal files** are only ever picked one by one, need an explicit tick in the preview, only go to the Trash, and are left out of a later permanent "delete from Trash" unless the user includes them.
+- **Three destinations, never added together:** freed on the Mac right away, freed after emptying the Trash, freed inside Docker's disk.
+- **One run record** drives the results, the receipt and History. It's written as soon as a run ends, leads each step with its outcome (DONE / SKIPPED / NOT RUN / FAILED), separates planned from executed actions, lists exact paths, and records a later Trash deletion as its own event. Stopping lets the current step finish with its real outcome.
+- **Honest states:** "Unknown", "Not measured", "0 bytes" and "Cleaned today" are distinct; sizes measured before a cleanup are labelled as such; partial totals (no Full Disk Access, a stopped first scan) say so.
+
+**Implementation choices that differ from the first draft:** history is stored as JSON in Application Support (a handful of scan summaries and runs doesn't need SQLite), and the app is built with SwiftPM plus the bundle script from M0 instead of XcodeGen. CI builds a universal app, runs it with `--demo --snapshots` to capture every screen in both appearances for QA, and signs it.
 
 **M2: Scanner and folder view**
 - Package skeleton, XcodeGen project, CI (Linux: `StorageCore` tests; macOS runner: build plus all tests), and a tag-triggered release job that signs (and, with option B, notarizes) the app, zips it and publishes it to GitHub Releases.

@@ -38,6 +38,12 @@ public struct ScanProgress: Sendable {
     public var finished: [String]
     public var running: [String]
     public var total: Int
+
+    public init(finished: [String], running: [String], total: Int) {
+        self.finished = finished
+        self.running = running
+        self.total = total
+    }
 }
 
 /// Runs every provider concurrently and assembles one snapshot.

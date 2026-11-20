@@ -62,6 +62,7 @@ jobs:
           scripts/bundle-app.sh "$BIN" "$APP_NAME" "$BUNDLE_ID" "$VERSION" "$GITHUB_RUN_NUMBER" "$COMMIT" dist
 
       - name: Screenshots (demo data, both appearances)
+        timeout-minutes: 8
         run: |
           mkdir -p screenshots
           for appearance in light dark; do

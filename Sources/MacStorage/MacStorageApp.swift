@@ -27,6 +27,10 @@ struct MacStorageApp: App {
 
     init() {
         _model = State(initialValue: AppModel(demo: LaunchOptions().demo))
+        if LaunchOptions().snapshots != nil {
+            // Never let an automated tour hang CI.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 240) { SnapshotTour.log("timed out"); exit(2) }
+        }
     }
 
     var body: some Scene {
@@ -53,7 +57,12 @@ struct SnapshotTour {
     let model: AppModel
     let folder: URL
 
+    static func log(_ message: String) {
+        FileHandle.standardError.write(Data("snapshot tour: \(message)\n".utf8))
+    }
+
     func run() async {
+        Self.log("started, writing to \(folder.path)")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         await settle()
         for section in AppSection.allCases {
@@ -87,6 +96,7 @@ struct SnapshotTour {
         model.snapshot = nil
         await shot("welcome")
         model.snapshot = saved
+        Self.log("done")
         NSApp.terminate(nil)
     }
 
@@ -95,10 +105,14 @@ struct SnapshotTour {
     private func shot(_ name: String, sheet: Bool = false, wait: Double = 0.6) async {
         await settle(wait)
         guard let window = NSApp.windows.first(where: { $0.isVisible && $0.sheetParent == nil }),
-              let target = (sheet ? window.attachedSheet ?? window : window).contentView else { return }
-        guard let rep = target.bitmapImageRepForCachingDisplay(in: target.bounds) else { return }
+              let target = (sheet ? window.attachedSheet ?? window : window).contentView,
+              let rep = target.bitmapImageRepForCachingDisplay(in: target.bounds) else {
+            Self.log("\(name): no window to capture (\(NSApp.windows.count) windows)")
+            return
+        }
         target.cacheDisplay(in: target.bounds, to: rep)
         let appearance = NSApp.appearance?.name == .darkAqua ? "dark" : "light"
         try? rep.representation(using: .png, properties: [:])?.write(to: folder.appending(path: "\(name)-\(appearance).png"))
+        Self.log("\(name) saved")
     }
 }

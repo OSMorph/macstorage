@@ -14,7 +14,7 @@ public final class Scrubber {
 
     private var placeholders: [String: [String: String]] = [:]   // category -> original -> placeholder
     private var counters: [String: Int] = [:]
-    private var literals: [(original: String, category: String, caseInsensitive: Bool)] = []
+    private var literals: [(original: String, category: String, caseInsensitive: Bool, prefix: Bool)] = []
     private var replacementCounts: [String: Int] = [:]
 
     public init(home: String, userName: String, hostNames: [String]) {
@@ -32,9 +32,10 @@ public final class Scrubber {
     public func learn(_ value: String, as category: String) {
         let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard v.count >= 3, !Scrubber.isHarmlessLiteral(v), !Scrubber.isKnownComponent(v) else { return }
+        if category == "volume" && Scrubber.isKnownVolumeName(v) { return }
         guard !literals.contains(where: { $0.original == v }) else { return }
         _ = placeholder(for: v, category: category)
-        literals.append((v, category, false))
+        literals.append((v, category, false, false))
     }
 
     /// Extra words the person wants hidden (an employer's name, a project codename).
@@ -45,7 +46,19 @@ public final class Scrubber {
             guard v.count >= 2 else { continue }
             guard !literals.contains(where: { $0.original.lowercased() == v.lowercased() }) else { continue }
             _ = placeholder(for: v.lowercased(), category: "redacted")
-            literals.append((v, "redacted", true))
+            literals.append((v, "redacted", true, false))
+        }
+    }
+
+    /// A person's name, word by word. Also hides words that start with it
+    /// ("Jane" hides "Janes-MacBook" and "Jane's"), case-insensitively.
+    public func redactName(_ words: [String]) {
+        for w in words {
+            let v = w.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard v.count >= 3 else { continue }
+            guard !literals.contains(where: { $0.original.lowercased() == v.lowercased() }) else { continue }
+            _ = placeholder(for: v.lowercased(), category: "redacted")
+            literals.append((v, "redacted", true, true))
         }
     }
 
@@ -56,13 +69,19 @@ public final class Scrubber {
 
     public func scrub(_ input: String) -> String {
         replacementCounts = [:]
-        var text = input
+
+        // 0. Paths under the home folder first, while the home path is still intact
+        //    (a name redaction would otherwise rewrite the username inside it).
+        var text = scrubHomePaths(input)
 
         // 1. Learned literals and redactions, longest first so "acme-api" wins over "acme".
         for item in literals.sorted(by: { $0.original.count > $1.original.count }) {
             let key = item.caseInsensitive ? item.original.lowercased() : item.original
             let replacement = placeholder(for: key, category: item.category)
-            let pattern = "(?<![A-Za-z0-9])" + NSRegularExpression.escapedPattern(for: item.original) + "(?![A-Za-z0-9])"
+            let escaped = NSRegularExpression.escapedPattern(for: item.original)
+            let pattern = item.prefix
+                ? "(?<![A-Za-z0-9])" + escaped + "[A-Za-z']*"
+                : "(?<![A-Za-z0-9])" + escaped + "(?![A-Za-z0-9])"
             let options: NSRegularExpression.Options = item.caseInsensitive ? [.caseInsensitive] : []
             text = replace(pattern, options: options, in: text, category: item.category) { _ in replacement }
         }
@@ -76,8 +95,8 @@ public final class Scrubber {
             self.placeholder(for: m.lowercased(), category: "email")
         }
 
-        // 4. Paths under the home folder: every component that isn't a well-known name is replaced.
-        text = scrubHomePaths(text)
+        // 4. Per-user temporary folders (/var/folders/xx/yyyy/) are random but stable per account.
+        text = replace(#"/var/folders/[^/\s]+/[^/\s]+/"#, in: text, category: "path") { _ in "/var/folders/XX/XXXX/" }
 
         // 5. Names of mounted volumes.
         text = replace(#"(?<=/Volumes/)[^/\s"'`,;:()\[\]<>]+"#, in: text, category: "volume") { m in
@@ -222,7 +241,12 @@ public final class Scrubber {
         ".dmg", ".iso", ".sock", ".json", ".plist", ".log", ".db", ".sqlite", ".zip", ".tar", ".gz", ".git",
     ]
 
-    static let knownVolumeNames: Set<String> = ["Macintosh HD", "Macintosh", "Recovery", "Preboot", "VM", "Data", "Update", "xarts", "iSCPreboot", "Hardware", "Nix"]
+    static let knownVolumeNames: Set<String> = ["Macintosh HD", "Macintosh HD - Data", "Macintosh", "Recovery", "Preboot", "VM",
+                                                 "Data", "Update", "xarts", "xART", "iSCPreboot", "Hardware", "Nix", "Nix Store"]
+
+    static func isKnownVolumeName(_ name: String) -> Bool {
+        knownVolumeNames.contains(name) || name.hasPrefix("Macintosh HD")
+    }
 
     // Matched as substrings, so only dotted identifiers that can't be part of a project name.
     static let knownVendorIDs = ["com.docker.", "group.com.docker", "dev.kdrag0n.", "dev.orbstack.", ".orbstack", "com.github.",

@@ -1,6 +1,6 @@
 # macstorage: plan
 
-Status: **M0 in progress.** Personal project, shared publicly with no support commitment (see "Repository").
+Status: **M0 done on an unmanaged Mac; next is the UI/UX design.** Checking the release on a managed (MDM) Mac is deferred until the app is worth installing there. Personal project, shared publicly with no support commitment (see "Repository").
 
 ## Goal
 
@@ -16,7 +16,7 @@ No LLM or network calls at runtime. All recommendations come from built-in rules
 | Primary view | Grouped by who owns the space (tool or project), with a folder view as a second tab. |
 | Sizes | Each tool's own accounting where it exists. Filesystem numbers made APFS-aware. Always show "on disk" next to "reclaimable". |
 | Recommendations | Rule-based, in four tiers (below). Every item shows the reason and the exact command or action. |
-| Cleanup | Built in (milestone 4). It always shows a preview that lists every item and command before anything runs. Files go to the Trash, tools clean up through their own commands. Nothing is off-limits beyond what the tiers say. |
+| Cleanup | Built in (milestone 5). It always shows a preview that lists every item and command before anything runs. Files go to the Trash, tools clean up through their own commands. Nothing is off-limits beyond what the tiers say. |
 | History | Store every scan. Show what grew, how fast, and what keeps coming back. |
 | Target | Developer Macs on a current macOS release, including MDM-managed ones. Not the App Store, not sandboxed. Minimum macOS 15. |
 | Distribution | GitHub Actions builds the app on a macOS runner and publishes it to GitHub Releases, where it's downloaded from. Signing: option A (self-signed) first, option B (Developer ID + notarization) only if A is blocked. |
@@ -111,7 +111,7 @@ Every item shows the rule that matched, why, how it gets rebuilt if that's relev
 
 The treemap is drawn with SwiftUI `Canvas` using a squarified layout. Flat collections like the Nix store are grouped by GC root or package name instead of hash-named folders.
 
-## Cleanup (milestone 4)
+## Cleanup (milestone 5)
 
 1. **Select** items from any view. "Leave alone" items can't be selected. Review items each need their own tick.
 2. **Preview.** This step is required and can't be skipped. It lists every action:
@@ -151,19 +151,34 @@ Insights to try (keep the ones that prove useful):
 
 Result: an updated plan with the paths, commands and distribution option confirmed.
 
-**M1: Scanner and folder view**
+**What M0 showed** (an unmanaged Mac on macOS 26, Apple Silicon):
+- **Install:** the self-signed release opens normally when downloaded with `curl` (no quarantine mark). A browser download gets "Apple could not verify…", as expected. Full Disk Access can be granted. Still open: whether it survives an update, and everything on a managed Mac.
+- **APFS:** `ATTR_CMNEXT_PRIVATESIZE` works. A fresh clone has private size 0 on both copies; after 2 MiB of one copy changes, both report 2 MiB private. The clone refcount and clone ID are also available. Allocated size (`st_blocks`, `totalFileAllocatedSize`) counts clones in full, so a folder of clones can be roughly twice its real cost (one worktree group: 6.4 GB allocated, 3.9 GB private). Sparse files report correctly (1 GiB logical, 1 MiB allocated).
+- **Volumes:** "available for important use" is 0 on the `/nix` volume, so the app uses plain available capacity there. The VM, Preboot and Recovery volumes and the Nix volume show up in `diskutil apfs list` with their consumed sizes, which is enough to explain "System Data" at the top level.
+- **Docker:** the `default` and `desktop-linux` contexts can be the same engine, so engines are de-duplicated by engine ID. The VM disk is 64 GB logical but 50 GB allocated, against about 36 GB of content inside, and `system df` already reports what's reclaimable per type (build cache was the largest).
+- **Nix:** finding dead paths took about 5 s and sizing them about 6 s, quick enough to run on every scan (the sizes are NAR sizes, an estimate of the disk cost). `darwin-rebuild --list-generations` needs root, so generations are read from `/nix/var/nix/profiles/system-*-link` instead.
+- **PATH:** started from Terminal with `open`, the app inherited the shell's PATH. Started from Finder or the Dock it won't, so locating tools explicitly stays necessary.
+- **Big owners outside the developer stack:** Downloads, messaging-app data in `~/Library/Group Containers`, AI model folders, IDE caches in `~/Library/Caches` and `~/Library/Application Support`. Owners therefore include **apps**, identified by bundle ID and shown with the app's real name and icon, not just tools.
+- **Speed:** a full discovery took about 6.5 minutes (home folders 3 minutes, git checkouts close to 2). The real app needs results that appear as they come in, parallel measurement, and caching between scans.
+- **Anonymizing:** the first report exposed a scrubber bug (home paths weren't anonymized when the account's full name contained the username). It's fixed, with regression tests, before any report becomes a fixture.
+
+**M1: UI/UX design.** An interactive HTML mockup of every main view, filled with real (anonymized) numbers from M0, iterated until the layout and wording are right. No Swift until it's agreed.
+
+**M2: Scanner and folder view**
 - Package skeleton, XcodeGen project, CI (Linux: `StorageCore` tests; macOS runner: build plus all tests), and a tag-triggered release job that signs (and, with option B, notarizes) the app, zips it and publishes it to GitHub Releases.
 - An About window that shows the version and commit, so it's clear which build is installed.
 - Volume overview, APFS-aware walk, folder treemap and list, scan coverage report.
 
-**M2: Owners and recommendations**
+**M3: Owners and recommendations**
 - One provider per tool from the table, matching rules, tiers, detail pane with commands to copy. Fixture-based tests for every parser and rule.
 
-**M3: History**
+**M4: History**
 - SQLite store, diffs, growth charts, the insights above.
 
-**M4: Cleanup**
+**M5: Cleanup**
 - Selection, preview, confirm, run, verify and log, as described above, starting with the Safe tier and adding the others once that flow has proven itself.
+
+**Before relying on it on a managed Mac:** repeat the M0 install and Full Disk Access checks there, then pick option A or B.
 
 **Later**
 - Background scans (login item or LaunchAgent), low-space notifications, menu-bar extra showing free space and the biggest recent growth.

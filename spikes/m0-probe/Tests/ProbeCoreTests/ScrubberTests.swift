@@ -100,3 +100,37 @@ final class ScrubberAllowListTests: XCTestCase {
         XCTAssertEqual(s.scrub("node_modules build"), "node_modules build")
     }
 }
+
+final class ScrubberRegressionTests: XCTestCase {
+    /// Regression: when the account's full name contains the username, the name redaction used to
+    /// rewrite /Users/<name> before home paths were scrubbed, so folder names leaked.
+    func testHomePathsAreScrubbedEvenWhenTheFullNameContainsTheUsername() {
+        let s = Scrubber(home: "/Users/jane", userName: "jane", hostNames: [])
+        s.redactName(["Jane", "Doe"])
+        XCTAssertEqual(s.scrub("/Users/jane/Documents/acme-secret/x.txt"), "/Users/USER/Documents/dir-1/dir-2")
+    }
+
+    func testNamePrefixesAreHidden() {
+        let s = Scrubber(home: "/Users/jane", userName: "jane", hostNames: [])
+        s.redactName(["Jane"])
+        XCTAssertEqual(s.scrub("Janes-MBP and Jane's laptop"), "redacted-1-MBP and redacted-1 laptop")
+    }
+
+    func testOldHostNamesInDotfilesAreHidden() {
+        let s = Scrubber(home: "/Users/jane", userName: "jane", hostNames: ["Mac"])
+        XCTAssertEqual(s.scrub("/Users/jane/.zcompdump-Janes-MBP-5.9.zwc"), "/Users/USER/dir-1")
+    }
+
+    func testStandardVolumeNamesAreNotLearned() {
+        let s = Scrubber(home: "/Users/jane", userName: "jane", hostNames: [])
+        for name in ["Preboot", "Recovery", "Update", "Macintosh HD - Data"] { s.learn(name, as: "volume") }
+        s.learn("Acme Backups", as: "volume")
+        XCTAssertEqual(s.scrub("Preboot Recovery Update Macintosh HD - Data Acme Backups"),
+                       "Preboot Recovery Update Macintosh HD - Data volume-1")
+    }
+
+    func testPerUserTempFolderIsHidden() {
+        let s = Scrubber(home: "/Users/jane", userName: "jane", hostNames: [])
+        XCTAssertEqual(s.scrub("/var/folders/cb/cz_abc123/T/x"), "/var/folders/XX/XXXX/T/x")
+    }
+}

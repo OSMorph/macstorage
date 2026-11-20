@@ -104,9 +104,14 @@ final class ProbeModel {
         hosts.append(hostName)
         if hostName.hasSuffix(".local") { hosts.append(String(hostName.dropLast(".local".count))) }
         if let computer = Host.current().localizedName { hosts.append(computer) }
+        for key in ["ComputerName", "LocalHostName", "HostName"] {
+            let r = Shell.run("/usr/sbin/scutil --get \(key)", environment: [:], timeout: 5)
+            let name = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if r.succeeded && !name.isEmpty { hosts.append(name) }
+        }
         let scrubber = Scrubber(home: NSHomeDirectory(), userName: NSUserName(), hostNames: hosts)
-        // The account's full name, word by word.
-        scrubber.redact(NSFullUserName().split(separator: " ").map(String.init).filter { $0.count >= 3 })
+        // The account's full name, word by word ("Jane" also hides "Janes-MacBook").
+        scrubber.redactName(NSFullUserName().split(separator: " ").map(String.init))
         return scrubber
     }
 

@@ -114,11 +114,11 @@ jobs:
           cat > notes.md <<EOF
           Throwaway M0 probe build ${version}. See [docs/PLAN.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/docs/PLAN.md) and the README for what it checks.
 
-          **Install**
-          1. Download \`${APP_NAME}-${version}.zip\`, unzip it, and move \`${APP_NAME}.app\` to Applications.
-          2. In Terminal: \`xattr -dr com.apple.quarantine /Applications/${APP_NAME}.app\`
-          3. Open it.
+          **Install** (in Terminal; \`curl\` doesn't add the quarantine mark that makes macOS refuse a self-signed app)
+          \`\`\`sh
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${APP_NAME}-${version}.zip" -o /tmp/probe.zip && rm -rf /Applications/${APP_NAME}.app && ditto -x -k /tmp/probe.zip /Applications && open /Applications/${APP_NAME}.app
+          \`\`\`
 
-          It is signed with the project's self-signed certificate, not notarized, so macOS won't open it until step 2 is done.
+          Downloaded in a browser instead? macOS will say "Apple could not verify…". Run \`xattr -dr com.apple.quarantine /Applications/${APP_NAME}.app\` or use **Open Anyway** in System Settings → Privacy & Security.
           EOF
           gh release create "$GITHUB_REF_NAME" dist/* --prerelease --title "Probe ${version}" --notes-file notes.md

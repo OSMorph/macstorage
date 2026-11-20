@@ -16,12 +16,13 @@ Early. The only thing that exists so far is the **M0 probe** (`spikes/m0-probe/`
 
 ### Trying the probe
 
-1. Download the latest `MacStorageProbe-*.zip` from [Releases](../../releases) and move `MacStorageProbe.app` to Applications.
-2. It's self-signed and not notarized, so remove the quarantine mark before opening it:
+1. In Terminal, download and install it in one go (replace the version with the latest from [Releases](../../releases)):
    ```sh
-   xattr -dr com.apple.quarantine /Applications/MacStorageProbe.app
+   v=0.1.0; curl -fsSL "https://github.com/OSMorph/macstorage/releases/download/probe-v$v/MacStorageProbe-$v.zip" -o /tmp/probe.zip \
+     && rm -rf /Applications/MacStorageProbe.app && ditto -x -k /tmp/probe.zip /Applications && open /Applications/MacStorageProbe.app
    ```
-3. Open it and follow the three steps in the window.
+2. That's needed because the app is self-signed, not notarized by Apple. A browser download gets a quarantine mark, and macOS then says "Apple could not verify…" and refuses to open it. `curl` doesn't add that mark. If you did download it in a browser, run `xattr -dr com.apple.quarantine /Applications/MacStorageProbe.app`, or click **Open Anyway** in System Settings → Privacy & Security.
+3. Follow the three steps in the window.
 
 It reads but doesn't change anything, apart from a small test folder in the temporary directory that it deletes again.
 

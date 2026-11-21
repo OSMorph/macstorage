@@ -267,6 +267,7 @@ public struct ToolLocator: Sendable {
             "HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_AUTOREMOVE": "1", "HOMEBREW_NO_INSTALL_CLEANUP": "1",
             "HOMEBREW_NO_ANALYTICS": "1", "HOMEBREW_NO_ENV_HINTS": "1", "DOCKER_CLI_HINTS": "false",
             "NO_UPDATE_NOTIFIER": "1", "npm_config_update_notifier": "false", "npm_config_fund": "false",
+            "npm_config_logs_max": "0",   // npm would otherwise write a log into its cache on every run
         ]) { _, fixed in fixed }
     }
 }

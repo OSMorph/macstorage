@@ -88,15 +88,34 @@ final class AppModel {
     private var stopSignal = StopSignal()
     private var tools: ToolLocator?
     private let store = HistoryStore()
-    /// Called once the run in progress has finished, with whether its record was saved.
+    /// Called once the cleanup or Trash deletion in progress has finished, with whether
+    /// its record was saved.
     private var onRunFinished: ((Bool) -> Void)?
+    /// True while items are being deleted from the Trash.
+    private(set) var deletingFromTrash = false
 
-    /// Quit during a cleanup: stop after the current step, then call `done` with whether
-    /// the record was saved (the app stays open if it wasn't, so the record isn't lost).
-    func quitAfterRun(_ done: @escaping (Bool) -> Void) {
+    /// Work that must finish (and be recorded) before the app quits.
+    var isBusy: Bool { isRunning || deletingFromTrash }
+
+    /// Quit during a cleanup or Trash deletion: a cleanup stops after the current step.
+    /// `done` gets whether the record was saved; the app stays open if it wasn't.
+    func quitWhenDone(_ done: @escaping (Bool) -> Void) {
         quitting = true
         onRunFinished = done
-        stopRun()
+        if isRunning { stopRun() }
+    }
+
+    private func finishedBusyWork(saved: Bool) {
+        let done = onRunFinished
+        onRunFinished = nil
+        quitting = false
+        done?(saved)
+    }
+
+    /// Saves every record that couldn't be saved before; true when none is left unsaved.
+    func retryUnsaved() async -> Bool {
+        for run in history.runs where unsavedRuns[run.id] != nil { await persist(run) }
+        return unsavedRuns.isEmpty
     }
 
     init(demo: Bool) {
@@ -300,10 +319,7 @@ final class AppModel {
         await persist(run)
         stopping = false
         sheet = .results(run)
-        let done = onRunFinished
-        onRunFinished = nil
-        quitting = false
-        done?(unsavedRuns[run.id] == nil)
+        finishedBusyWork(saved: unsavedRuns[run.id] == nil)
     }
 
     func persist(_ run: RunRecord) async {
@@ -314,6 +330,8 @@ final class AppModel {
     }
 
     func deleteFromTrash(_ run: RunRecord, includePicked: Bool) async {
+        deletingFromTrash = true
+        defer { deletingFromTrash = false; finishedBusyWork(saved: unsavedRuns[run.id] == nil) }
         let chosen = run.stillInTrash.filter { includePicked || !$0.picked }
         // The record on disk is the full one, unless this session has changes it couldn't save.
         let demo = demo, store = store, useMemory = demo || unsavedRuns[run.id] != nil
@@ -341,6 +359,18 @@ final class AppModel {
         guard !demo else { return run }
         let store = store
         return await offload { store.fullRun(run.id) ?? run }
+    }
+
+    /// Lists a skipped folder-clearing item again and ticks it, so it can run without a
+    /// full scan. Returns false if the folder couldn't be listed completely.
+    func refresh(_ itemID: String) async -> Bool {
+        guard let snapshot, let o = snapshot.owners.firstIndex(where: { $0.items.contains { $0.id == itemID } }),
+              let i = snapshot.owners[o].items.firstIndex(where: { $0.id == itemID }),
+              let fresh = await LanguageCachesProvider.refreshed(snapshot.owners[o].items[i]) else { return false }
+        self.snapshot?.owners[o].items[i] = fresh
+        cleanupState.skipped.remove(itemID)
+        selected.insert(itemID)
+        return true
     }
 
     // MARK: Navigation

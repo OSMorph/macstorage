@@ -56,7 +56,7 @@ final class FileSizesTests: XCTestCase {
         FileManager.default.createFile(atPath: secret.appending(path: "x").path, contents: Data(repeating: 1, count: 100_000))
         let size = FileSizes.measure(dir.path, WalkOptions(excluding: [secret.path]))
         XCTAssertEqual(size.files, 0)
-        XCTAssertTrue(FileSizes.children(of: dir.path, WalkOptions(excluding: [secret.path])).isEmpty)
+        XCTAssertEqual(FileSizes.children(of: dir.path, WalkOptions(excluding: [secret.path]))?.isEmpty, true)
     }
 
     func testGitCheckoutsCanBeSkipped() throws {

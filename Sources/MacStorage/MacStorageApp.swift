@@ -39,10 +39,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quitting during a cleanup lets the current step finish and the run be recorded first.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let model = Self.model
-        guard model.isRunning else { return .terminateNow }
-        // If the record couldn't be saved, stay open: the results offer to save it again.
-        model.quitAfterRun { saved in NSApp.reply(toApplicationShouldTerminate: saved) }
-        return .terminateLater
+        if model.isBusy {
+            // If the record couldn't be saved, stay open: the results offer to save it again.
+            model.quitWhenDone { saved in NSApp.reply(toApplicationShouldTerminate: saved) }
+            return .terminateLater
+        }
+        guard !model.unsavedRuns.isEmpty, !model.demo else { return .terminateNow }
+        // Records that exist only in memory would be lost.
+        let alert = NSAlert()
+        alert.messageText = "\(plural(model.unsavedRuns.count, "cleanup record")) couldn't be saved"
+        alert.informativeText = "If you quit now, History won't have \(model.unsavedRuns.count == 1 ? "it" : "them"). The cleanups themselves are done."
+        alert.addButton(withTitle: "Try Saving Again")
+        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            Task { NSApp.reply(toApplicationShouldTerminate: await model.retryUnsaved()) }
+            return .terminateLater
+        case .alertSecondButtonReturn:
+            return .terminateNow
+        default:
+            return .terminateCancel
+        }
     }
 }
 
@@ -115,7 +133,12 @@ struct SnapshotTour {
         await shot("owners-cleaned-item", window)
         let saved = model.snapshot
         if var partial = saved {
-            partial.coverage.append(CoverageEntry(area: "Git checkouts", status: .stopped, detail: "Not finished: the scan was stopped."))
+            // What a first scan stopped early looks like: some areas finished, the rest not.
+            let unfinished = ["Container engines", "Git checkouts", "Folder sizes"]
+            partial.owners.removeAll { ["docker", "git"].contains($0.id) }
+            partial.folders = [:]
+            partial.coverage.removeAll { $0.area.hasPrefix("Docker") || $0.area.hasPrefix("Home folder") }
+            partial.coverage += unfinished.map { CoverageEntry(area: $0, status: .stopped, detail: "Not finished: the scan was stopped.") }
             model.setSnapshot(partial)
             model.section = .overview
             await shot("overview-partial-scan", window)

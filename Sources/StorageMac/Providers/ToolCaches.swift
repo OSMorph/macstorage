@@ -50,13 +50,19 @@ public struct LanguageCachesProvider: Provider {
 
     /// A cache the tool can clear itself, found by asking the tool where it is. Only used when
     /// the tool answers: the executor asks it again before clearing.
+    /// The part of a tool's cache folder its clean command empties, when not all of it:
+    /// `npm cache clean` empties `_cacache` and leaves `_logs` and `_npx`.
+    static let clearedSubfolder: [ItemKind: String] = [.npmCache: "_cacache"]
+
     /// Returns the fact, or a coverage entry when the tool is installed but didn't answer.
     private func clearable(_ ctx: ScanContext, _ kind: ItemKind, ask tool: String, _ args: [String]) async -> (Fact?, CoverageEntry?) {
         guard let answer = await ctx.output(tool, args) else {
             return (nil, ctx.tools.isInstalled(tool) ? ctx.unavailable(tool, area: "\(tool) cache", what: tool) : nil)
         }
-        guard let reported = answer.split(separator: "\n").first.map({ String($0).trimmingCharacters(in: .whitespaces) }),
-              reported.hasPrefix("/"), let identity = FileSizes.directoryIdentity(reported), !ctx.isProtected(reported) else { return (nil, nil) }
+        guard let answered = answer.split(separator: "\n").first.map({ String($0).trimmingCharacters(in: .whitespaces) }),
+              answered.hasPrefix("/") else { return (nil, nil) }
+        let reported = answered + (Self.clearedSubfolder[kind].map { "/" + $0 } ?? "")
+        guard let identity = FileSizes.directoryIdentity(reported), !ctx.isProtected(reported) else { return (nil, nil) }
         // Listed through the real path, so a symlinked cache folder shows what's really in it.
         let options = ctx.walk(), real = FileSizes.realPath(reported) ?? reported
         let (targets, size) = await offload { FileSizes.manifest(real, options) }
@@ -107,6 +113,24 @@ public struct LanguageCachesProvider: Provider {
                                         location: facts.compactMap(\.path).map(ctx.display).joined(separator: ", "), items: facts.map(Rules.item))
         }
         return ProviderResult(owners: owners, coverage: [CoverageEntry(area: area, status: .measured, detail: owners.map(\.name).joined(separator: ", ") + ".")] + failures)
+    }
+}
+
+extension LanguageCachesProvider {
+    /// A folder-clearing item listed again, for when the tool used its cache after the
+    /// preview (a build or install adds files, and the step is then skipped). nil when the
+    /// folder is gone or the list is incomplete.
+    public static func refreshed(_ item: Item) async -> Item? {
+        guard case .clearFolder(_, let root, _) = item.action, let identity = FileSizes.directoryIdentity(root) else { return nil }
+        let real = FileSizes.realPath(root) ?? root
+        let (targets, size) = await offload { FileSizes.manifest(real) }
+        guard size.isComplete else { return nil }
+        var fact = Fact(item.kind, onDisk: size.onDisk, sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
+                        targets: targets, root: root)
+        fact.scopeGuard = .folder(identity)
+        var fresh = Rules.item(fact)
+        fresh.id = item.id
+        return fresh
     }
 }
 

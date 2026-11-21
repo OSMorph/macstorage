@@ -238,7 +238,11 @@ struct ResultsPhase: View {
                     case .skipped(let why):
                         HStack {
                             Text(why + " It's unticked until you scan again.").font(.caption).foregroundStyle(Color.warningText)
-                            Button("View the approved list") { model.sheet = nil; model.show(owner: ownerID(r), item: r.step.item.id) }.buttonStyle(.link).font(.caption)
+                            if case .clearFolder = r.step.item.action {
+                                RefreshButton(model: model, itemID: r.step.item.id)
+                            } else {
+                                Button("View the approved list") { model.sheet = nil; model.show(owner: ownerID(r), item: r.step.item.id) }.buttonStyle(.link).font(.caption)
+                            }
                         }
                     case .partial(_, let problems):
                         ForEach(problems, id: \.self) { Text($0).font(.caption).foregroundStyle(Color.warningText) }
@@ -378,4 +382,23 @@ func freedText(_ run: RunRecord, _ d: Destination) -> String {
     let unmeasured = run.unmeasured(d)
     guard unmeasured > 0 else { return formatBytes(measured) }
     return measured == 0 ? "Not re-measured" : "≥ " + formatBytes(measured)
+}
+
+/// Lists a skipped cache folder again so it can be reviewed and run without a full scan.
+struct RefreshButton: View {
+    let model: AppModel
+    let itemID: String
+    @State private var state: String?
+
+    var body: some View {
+        if let state {
+            Text(state).font(.caption).foregroundStyle(.secondary)
+        } else {
+            Button("List it again and tick it") {
+                state = "Listing…"
+                Task { state = await model.refresh(itemID) ? "Listed again and ticked: review it in the next preview." : "Couldn't list it completely. Scan again." }
+            }
+            .buttonStyle(.link).font(.caption)
+        }
+    }
 }

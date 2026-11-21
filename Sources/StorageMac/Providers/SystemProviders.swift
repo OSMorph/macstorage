@@ -117,11 +117,14 @@ public struct LibraryProvider: Provider {
             let root = ctx.expand(folder), options = ctx.walk()
             guard !ctx.protectedPaths.contains(root) else { return }
             for (name, size) in await offload({ FileSizes.children(of: root, options) ?? [] }) where size.allocated >= Self.threshold {
-                let path = root + "/" + name, key = Self.appKey(name)
-                var fact = Fact(kind, key: "\((folder as NSString).lastPathComponent)/\(name)", onDisk: size.onDisk,
+                let path = root + "/" + name
+                // macOS services' caches: grouped, never cleaned (background services can't be detected as running).
+                let service = kind == .appCache && Self.isSystemService(name)
+                let key = service ? Self.systemServicesKey : Self.appKey(name), factKind = service ? .systemCache : kind
+                var fact = Fact(factKind, key: "\((folder as NSString).lastPathComponent)/\(name)", name: service ? name : nil, onDisk: size.onDisk,
                                 sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
-                                targets: kind == .appCache ? [Target(path, bytes: size.privateBytes, identity: FileSizes.identity(path))] : [], path: path)
-                fact.appBundleID = kind == .appCache ? key : nil   // matched against running apps before trashing
+                                targets: factKind == .appCache ? [Target(path, bytes: size.privateBytes, identity: FileSizes.identity(path))] : [], path: path)
+                fact.appBundleID = factKind == .appCache ? key : nil   // matched against running apps before trashing
                 byApp[key, default: []].append(fact)
             }
         }
@@ -132,7 +135,9 @@ public struct LibraryProvider: Provider {
         // Developer tools have their own providers (keys as `appKey` returns them).
         let toolKeys: Set<String> = ["go-build", "pip", "pypoetry", "Homebrew", "com.docker.docker", "com.docker", "dev.orbstack", "pnpm", "uv"]
         let owners = byApp.filter { !toolKeys.contains($0.key) }.map { key, facts in
-            Owner(id: "app:" + key, name: Self.appName(key), kind: .apps, location: facts.compactMap(\.path).map(ctx.display).joined(separator: ", "), items: facts.map(Rules.item))
+            key == Self.systemServicesKey
+                ? Owner(id: "macos-services", name: "macOS services' caches", kind: .system, location: "~/Library/Caches", items: facts.map(Rules.item))
+                : Owner(id: "app:" + key, name: Self.appName(key), kind: .apps, location: facts.compactMap(\.path).map(ctx.display).joined(separator: ", "), items: facts.map(Rules.item))
         }
         // Logs go to the Trash folder by folder (one per app), so the list stays short.
         let logs = ctx.expand("~/Library/Logs"), options = ctx.walk()
@@ -147,6 +152,13 @@ public struct LibraryProvider: Provider {
         let logOwner = Owner(id: "logs", name: "Logs", kind: .system, location: "~/Library/Logs", items: [Rules.item(logFact)])
         return ProviderResult(owners: owners + (logBytes > 0 || listed == nil ? [logOwner] : []),
                               coverage: [CoverageEntry(area: area, status: .measured, detail: "Caches, app data\(ctx.fullDiskAccess ? ", containers" : "") and logs in ~/Library.")])
+    }
+
+    static let systemServicesKey = "macOS services"
+
+    /// Caches of Apple's background services, which run without being visible apps.
+    static func isSystemService(_ folder: String) -> Bool {
+        folder.hasPrefix("com.apple.") || ["CloudKit", "GeoServices", "FamilyCircle", "familycircled", "PassKit", "Metadata"].contains(folder)
     }
 
     /// Folders of one app share a key: "com.tinyspeck.slackmacgap", "TEAMID.com.example.app" → bundle ID.

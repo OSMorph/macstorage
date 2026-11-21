@@ -15,8 +15,9 @@ struct OverviewView: View {
                         TierTile(tier: .probablySafe, accounting: acc, action: nil)
                         Tile(title: { TierBadge(tier: .review) }, value: formatBytes(acc.reviewOnDisk), unit: "on disk",
                              note: "Your own data. Nothing estimated: only you can decide what goes.")
-                        Tile(title: { Text("Not attributed yet") }, value: formatBytes(s.unattributed), unit: "on disk",
-                             note: model.fullDiskAccess || model.demo ? "Mostly outside your home folder (/Applications, /Library, /private), which this scan didn't measure."
+                        Tile(title: { Text(s.isPartial ? "Not scanned or attributed yet" : "Not attributed yet") }, value: formatBytes(s.unattributed), unit: "on disk",
+                             note: s.isPartial ? "Includes everything in \(s.unfinishedAreas.joined(separator: ", ")), which this stopped scan didn't reach."
+                                : model.fullDiskAccess || model.demo ? "Mostly outside your home folder (/Applications, /Library, /private), which this scan didn't measure."
                                 : "Folders macOS hides without Full Disk Access, plus places outside your home folder this scan didn't measure.",
                              link: ("See scan coverage", { model.section = .coverage }))
                     }
@@ -50,7 +51,8 @@ struct DiskBar: View {
     var body: some View {
         // Scaled to the disk's capacity; the segments add up to it.
         let segments: [(String, Int64, Color)] = accounting.diskSegments.filter { $0.bytes > 0 || $0.kind != nil }.map { s in
-            (s.label, s.bytes, s.kind?.color ?? (s.id == "free" ? .clear : s.id == "other" ? .secondary.opacity(0.2) : .secondary.opacity(0.4)))
+            (s.id == "unattributed" && snapshot.isPartial ? "Not scanned or attributed yet" : s.label, s.bytes,
+             s.kind?.color ?? (s.id == "free" ? .clear : s.id == "other" ? .secondary.opacity(0.2) : .secondary.opacity(0.4)))
         }
         let total = Double(max(snapshot.disk.total, segments.map(\.1).reduce(0, +)))
         VStack(alignment: .leading, spacing: 8) {

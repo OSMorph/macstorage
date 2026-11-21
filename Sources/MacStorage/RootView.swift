@@ -104,7 +104,7 @@ struct StatusStrips: View {
                     Label("\(plural(model.unsavedRuns.count, "cleanup record")) couldn't be saved. \(model.unsavedRuns.first?.value ?? "")", systemImage: "exclamationmark.triangle.fill")
                     Spacer()
                     Button("Try again") {
-                        Task { for run in model.history.runs where model.unsavedRuns[run.id] != nil { await model.persist(run) } }
+                        Task { _ = await model.retryUnsaved() }
                     }
                 }
                 .padding(8).background(.yellow.opacity(0.15))

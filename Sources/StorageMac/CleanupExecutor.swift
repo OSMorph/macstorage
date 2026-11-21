@@ -146,8 +146,13 @@ public struct CleanupExecutor: Sendable {
         let real = FileSizes.realPath(root) ?? root
         let (current, before) = await offload { FileSizes.manifest(real) }
         guard before.isComplete else { return skip("The folder couldn't be listed completely again.") }
+        // A new name, or a name now holding a different object, wasn't reviewed. An approved
+        // file the tool rewrote in place (an index, a trim stamp) is still the one reviewed.
         let approved = Dictionary(step.approvedTargets.map { ($0.id, $0.identity) }, uniquingKeysWith: { a, _ in a })
-        let unreviewed = current.filter { t in approved[t.id].map { $0 != t.identity } ?? true }.count
+        let unreviewed = current.filter { t in
+            guard let seen = approved[t.id], let seen, let now = t.identity else { return true }
+            return !now.isSameObject(as: seen)
+        }.count
         guard unreviewed == 0 else {
             return skip("\(plural(unreviewed, "file")) appeared or changed in the folder after you reviewed it. Scan again to review them.")
         }
@@ -293,12 +298,14 @@ public struct CleanupExecutor: Sendable {
             }
         }
         let measured = moved.map(\.bytes).reduce(0, +)
-        let outcome: StepOutcome = if !problems.isEmpty {
-            moved.isEmpty ? .failed(error: problems.joined(separator: " ")) : .partial(measured: measured, problems: problems)
-        } else if moved.isEmpty {
-            .skipped(reason: "Nothing on the approved list was still as you reviewed it.")
-        } else {
+        // When nothing moved, nothing irreversible happened: skipped, so later steps still run.
+        let outcome: StepOutcome = if moved.isEmpty {
+            .skipped(reason: problems.isEmpty ? "Nothing on the approved list was still as you reviewed it."
+                     : "Nothing could be moved to the Trash: \(problems.joined(separator: " "))")
+        } else if problems.isEmpty {
             .done(measured: measured)
+        } else {
+            .partial(measured: measured, problems: problems)
         }
         return .init(step: step, outcome: outcome, trashed: moved, leftAlone: leftAlone)
     }
@@ -352,13 +359,14 @@ public struct CleanupExecutor: Sendable {
         let query: (String, [String])? = switch item.kind {
         case .goModuleCache: ("go", ["env", "GOMODCACHE"])
         case .goBuildCache: ("go", ["env", "GOCACHE"])
-        case .npmCache: ("npm", ["config", "get", "cache"])
+        case .npmCache: ("npm", ["config", "get", "cache"])   // `npm cache clean` empties its _cacache folder
         case .uvCache: ("uv", ["cache", "dir"])
         case .pipCache: ("pip3", ["cache", "dir"])
         default: nil
         }
-        guard let query, let out = try? await tools.run(query.0, query.1), out.succeeded else { return nil }
-        return out.stdout.split(separator: "\n").first.map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let query, let out = try? await tools.run(query.0, query.1), out.succeeded,
+              let reported = out.stdout.split(separator: "\n").first.map({ $0.trimmingCharacters(in: .whitespaces) }) else { return nil }
+        return reported + (LanguageCachesProvider.clearedSubfolder[item.kind].map { "/" + $0 } ?? "")
     }
 }
 

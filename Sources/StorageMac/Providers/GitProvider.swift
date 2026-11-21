@@ -116,12 +116,14 @@ public struct GitProvider: Provider {
     func inspect(_ ctx: ScanContext, _ path: String, isWorktree: Bool) async -> Checkout {
         let status = await ctx.output("git", ["-C", path, "status", "--porcelain=v1", "--branch"], timeout: .seconds(20))
         let modified = Self.lastActivity(path, isWorktree: isWorktree)
-        // Build output only counts when git ignores it: a committed dist/ is source.
+        // Build output only counts when git ignores it and tracks nothing inside it: a
+        // committed dist/ is source.
         var ignored: [String] = []
         for name in Self.buildOutputNames where FileManager.default.fileExists(atPath: path + "/" + name) {
-            if let out = try? await ctx.tools.run("git", ["-C", path, "check-ignore", "-q", name], timeout: .seconds(10)), out.status == 0 {
-                ignored.append(path + "/" + name)
-            }
+            guard let check = try? await ctx.tools.run("git", ["-C", path, "check-ignore", "-q", name], timeout: .seconds(10)), check.status == 0,
+                  let tracked = try? await ctx.tools.run("git", ["-C", path, "ls-files", "--", name], timeout: .seconds(20)),
+                  tracked.succeeded, tracked.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            ignored.append(path + "/" + name)
         }
         let short = ctx.walk(limit: .seconds(20)), long = ctx.walk(limit: .seconds(30), skipGitCheckouts: true), outputs = ignored
         let (build, size) = await offload {

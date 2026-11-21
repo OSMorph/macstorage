@@ -54,7 +54,7 @@ public enum ItemKind: String, Codable, CaseIterable, Sendable {
     case homebrewOldVersions
     case xcodeDerivedData, xcodeArchives, xcodeDeviceSupport, simulatorsUnavailable
     case gitBuildOutput, gitUnsavedWork, gitRecent
-    case appCache, appData, appLogs
+    case appCache, appData, appLogs, systemCache
     case downloads, documents
     case macOSVolume, commandLineTools
 }
@@ -209,6 +209,9 @@ public enum Rules {
         case .appCache:
             return Rule(name: "Cache", tier: .safe, why: "The app refills its cache as you use it. If a running app matches this folder (by bundle ID, name or vendor), the step is skipped so its cache isn't pulled from under it.",
                         action: .moveToTrash, unit: "folder")
+        case .systemCache:
+            return Rule(name: "Cache of a macOS service", tier: .leaveAlone,
+                        why: "macOS services keep these caches and manage their size. They run in the background, so the app can't tell when one is in use, and leaves them alone.")
         case .appData:
             return Rule(name: "App data", tier: .review, why: "Settings, documents or downloaded content the app keeps. Only the app can clean this safely.",
                         action: .userActsInApp("Manage this from inside the app"))

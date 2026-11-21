@@ -37,12 +37,16 @@ public struct Reclaimable: Equatable, Sendable {
 /// Totals the Overview and the owner tables show, computed one way for every view.
 public struct Accounting: Sendable {
     public let snapshot: Snapshot
-    /// Items already cleaned since the snapshot was taken: they no longer count as reclaimable.
+    /// Items a cleanup acted on since the snapshot was taken (fully or partly): they no
+    /// longer count as reclaimable.
     public let cleaned: Set<String>
+    /// Of those, the ones only partly cleaned.
+    public let partlyCleaned: Set<String>
 
-    public init(_ snapshot: Snapshot, cleaned: Set<String> = []) {
+    public init(_ snapshot: Snapshot, cleaned: Set<String> = [], partlyCleaned: Set<String> = []) {
         self.snapshot = snapshot
-        self.cleaned = cleaned
+        self.cleaned = cleaned.union(partlyCleaned)
+        self.partlyCleaned = partlyCleaned
     }
 
     /// What the app could clean in a tier, split by destination.
@@ -79,6 +83,7 @@ public struct Accounting: Sendable {
     public func reclaimableLabel(owner: Owner) -> ReclaimableLabel {
         let r = reclaimable(owner: owner)
         if r.byDestination.values.contains(where: { $0 > 0 }) { return .bytes(r) }
+        if owner.items.contains(where: { partlyCleaned.contains($0.id) }) { return .partlyCleaned }
         if owner.items.contains(where: { cleaned.contains($0.id) }) { return .cleaned }
         let undecided = owner.items.contains { $0.reclaimable == .unknown && $0.tier != .leaveAlone && $0.tier != .notRemovable }
         return undecided ? .unknown : .none
@@ -127,5 +132,6 @@ public enum ReclaimableLabel: Equatable, Sendable {
     case bytes(Reclaimable)
     case unknown
     case cleaned
+    case partlyCleaned
     case none
 }

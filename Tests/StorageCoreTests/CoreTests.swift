@@ -256,6 +256,35 @@ final class RunRecordTests: XCTestCase {
         XCTAssertEqual(run.progressText, "2 of 4 steps done, 1 partly done")
     }
 
+    func testAStepWithItemsLeftAloneIsPartlyDoneEverywhere() {
+        var run = makeRun()
+        let i = index(run, "go/goBuildCache")
+        run.steps[i].leftAlone = ["~/x: replaced or changed since the scan."]
+        XCTAssertEqual(run.summaryText, "0 of 3 steps done, 1 partly done, 1 skipped, 1 not run.")
+        XCTAssertTrue(Receipt.text(run).contains("PARTLY DONE (some left alone) · Go · Build cache"))
+    }
+
+    func testATrashStepSkippedForARunningAppStaysTicked() {
+        var run = makeRun()
+        let i = index(run, "downloads/downloads")
+        run.steps[i].outcome = .skipped(reason: "Slack is running.")
+        XCTAssertFalse(CleanupState(runs: [run], after: .distantPast).skipped.contains("downloads/downloads"))
+        run.steps[i].leftAlone = ["~/Downloads/Docker.dmg: replaced or changed since the scan."]
+        XCTAssertTrue(CleanupState(runs: [run], after: .distantPast).skipped.contains("downloads/downloads"),
+                      "every target changed: it can't succeed before a new scan")
+    }
+
+    func testLowerBoundsKeepTheirSignEvenAtZero() {
+        let s = Demo.snapshot()
+        var step = CleanupPlan(snapshot: s, selected: ["go/goBuildCache"], picks: [:]).steps[0]
+        step.item.reclaimable = .atLeast(0)
+        step.expectedBytes = 0
+        XCTAssertEqual(step.expectedText, "≥ 0 bytes")
+        step.item.reclaimable = .atLeast(5_000_000_000)
+        step.expectedBytes = 5_000_000_000
+        XCTAssertEqual(step.expectedText, "≥ 5.0 GB")
+    }
+
     func testTrashDeletionIsItsOwnEventAndOnlyCountsDeletedEntries() {
         var run = makeRun()
         let mine = TrashEntry(original: "~/Downloads/a.iso", landed: "/t/a.iso", identity: nil, bytes: 7, picked: true)

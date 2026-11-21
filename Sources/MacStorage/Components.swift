@@ -115,6 +115,7 @@ struct ReclaimableText: View {
             }
         case .unknown: Text("Unknown").foregroundStyle(.secondary)
         case .cleaned: Text("Cleaned since this scan").foregroundStyle(.secondary)
+        case .partlyCleaned: Text("Partly cleaned since this scan").foregroundStyle(.secondary)
         case .none: Text("0 bytes").foregroundStyle(.secondary)
         }
     }

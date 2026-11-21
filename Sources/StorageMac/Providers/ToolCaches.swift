@@ -122,10 +122,10 @@ extension LanguageCachesProvider {
     /// A folder-clearing item listed again, for when the tool used its cache after the
     /// preview (a build or install adds files, and the step is then skipped). nil when the
     /// folder is gone or the list is incomplete.
-    public static func refreshed(_ item: Item) async -> Item? {
-        guard case .clearFolder(_, let root, _) = item.action, let identity = FileSizes.directoryIdentity(root) else { return nil }
-        let real = FileSizes.realPath(root) ?? root
-        let (targets, size) = await offload { FileSizes.manifest(real) }
+    public static func refreshed(_ item: Item, _ ctx: ScanContext) async -> Item? {
+        guard case .clearFolder(_, let root, _) = item.action, !ctx.isProtected(root), let identity = FileSizes.directoryIdentity(root) else { return nil }
+        let real = FileSizes.realPath(root) ?? root, options = ctx.walk()
+        let (targets, size) = await offload { FileSizes.manifest(real, options) }
         guard size.isComplete else { return nil }
         var fact = Fact(item.kind, onDisk: size.onDisk, sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
                         targets: targets, root: root)

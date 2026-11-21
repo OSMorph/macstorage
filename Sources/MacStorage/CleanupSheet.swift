@@ -240,7 +240,7 @@ struct ResultsPhase: View {
                     switch r.outcome {
                     case .skipped(let why):
                         HStack {
-                            Text(why + skipAdvice(r.step)).font(.caption).foregroundStyle(Color.warningText)
+                            Text(why + skipAdvice(r)).font(.caption).foregroundStyle(Color.warningText)
                             if case .clearFolder = r.step.item.action {
                                 RefreshButton(model: model, itemID: r.step.item.id)
                             } else {
@@ -355,21 +355,15 @@ struct ResultsPhase: View {
     }
 
     /// What happens to a skipped step next, by why it was skipped.
-    private func skipAdvice(_ step: CleanupStep) -> String {
-        switch step.item.action {
+    private func skipAdvice(_ r: RunRecord.StepResult) -> String {
+        switch r.step.item.action {
         case .clearFolder: " List it again to review what's there now."
-        case .moveToTrash, .pickToTrash: " It stays ticked; run cleanup again when that's resolved."
+        case .moveToTrash where r.leftAlone.isEmpty, .pickToTrash where r.leftAlone.isEmpty: " It stays ticked; run cleanup again when that's resolved."
         default: " It's unticked until you scan again."
         }
     }
 
-    private var summary: String {
-        let skipped = run.steps.filter { if case .skipped = $0.outcome { true } else { false } }.count
-        let notRun = run.steps.filter { if case .notRun = $0.outcome { true } else { false } }.count
-        let failed = run.steps.filter { if case .failed = $0.outcome { true } else { false } }.count
-        return run.progressText + (skipped > 0 ? ", \(skipped) skipped" : "")
-            + (failed > 0 ? ", \(failed) failed" : "") + (notRun > 0 ? ", \(notRun) not run" : "") + "."
-    }
+    private var summary: String { run.summaryText }
 
     /// "16.2 GB measured · predicted 16.7 GB", or the prediction alone when it couldn't be measured.
     private func outcomeText(_ r: RunRecord.StepResult) -> String {

@@ -67,6 +67,10 @@ final class FileSizesTests: XCTestCase {
     }
 }
 
+func XCTUnwrapAsync<T>(_ value: T?, file: StaticString = #filePath, line: UInt = #line) async throws -> T {
+    try XCTUnwrap(value, file: file, line: line)
+}
+
 final class Journal: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: [RunRecord] = []
@@ -354,6 +358,30 @@ final class CleanupSafetyTests: XCTestCase {
         let result = await executor(tools).perform(s, previewTime: .now)
         XCTAssertTrue(result.outcome.isDone, "\(result.outcome)")
         XCTAssertTrue(tools.calls.contains("npm cache clean --force"))
+    }
+
+    func testAFileReplacedWithANewOneSkipsTheClear() async throws {
+        let folder = try cacheFolder()
+        let s = try cacheStep(folder)
+        try FileManager.default.removeItem(at: folder.appending(path: "a"))
+        FileManager.default.createFile(atPath: folder.appending(path: "a").path, contents: Data([2]))   // same name, new object
+        let tools = goTools(folder)
+        let result = await executor(tools).perform(s, previewTime: .now)
+        guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertFalse(tools.calls.contains("go clean -cache"))
+    }
+
+    func testASkippedCacheCanBeListedAgainAndThenRuns() async throws {
+        let folder = try cacheFolder()
+        let s = try cacheStep(folder)
+        FileManager.default.createFile(atPath: folder.appending(path: "new").path, contents: Data([1]))
+        let ctx = ScanContext(tools: FakeTools(), home: home.path, fullDiskAccess: true)
+        let fresh = try await XCTUnwrapAsync(await LanguageCachesProvider.refreshed(s.item, ctx))
+        XCTAssertEqual(fresh.id, s.item.id)
+        XCTAssertTrue(fresh.targets.contains { $0.id.hasSuffix("/new") })
+        let again = CleanupStep(item: fresh, ownerName: "O", approvedTargets: fresh.targets, expectedBytes: 1, destination: .mac)
+        let result = await executor(goTools(folder, clearing: true)).perform(again, previewTime: .now)
+        XCTAssertTrue(result.outcome.isDone, "\(result.outcome)")
     }
 
     func testAReplacedFolderSkipsTheClear() async throws {

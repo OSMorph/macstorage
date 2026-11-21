@@ -137,7 +137,7 @@ final class AppModel {
     /// Cleanup until a new scan: what's left of a partly cleaned item isn't known.
     var actedOn: Set<String> { Set(cleaned.keys).union(cleanupState.partlyCleaned.keys) }
 
-    var accounting: Accounting? { snapshot.map { Accounting($0, cleaned: actedOn) } }
+    var accounting: Accounting? { snapshot.map { Accounting($0, cleaned: Set(cleaned.keys), partlyCleaned: Set(cleanupState.partlyCleaned.keys)) } }
     var isRunning: Bool { if case .running? = sheet { true } else { false } }
 
     private func load(_ snapshot: Snapshot, history: History) {
@@ -373,7 +373,8 @@ final class AppModel {
     func refresh(_ itemID: String) async -> Bool {
         guard let snapshot, let o = snapshot.owners.firstIndex(where: { $0.items.contains { $0.id == itemID } }),
               let i = snapshot.owners[o].items.firstIndex(where: { $0.id == itemID }),
-              let fresh = await LanguageCachesProvider.refreshed(snapshot.owners[o].items[i]) else { return false }
+              let fresh = await LanguageCachesProvider.refreshed(snapshot.owners[o].items[i],
+                                                                 ScanContext(tools: Shell(tools: await locator()), fullDiskAccess: fullDiskAccess)) else { return false }
         self.snapshot?.owners[o].items[i] = fresh
         cleanupState.skipped.remove(itemID)
         selected.insert(itemID)

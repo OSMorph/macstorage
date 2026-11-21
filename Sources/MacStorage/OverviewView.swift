@@ -35,7 +35,7 @@ struct OverviewView: View {
     private func partialNote(_ s: Snapshot) -> String {
         let areas = s.unfinishedAreas.filter { $0 != "Folder sizes" }
         return "Includes " + (areas.isEmpty ? "folders this stopped scan didn't size" : "what this stopped scan didn't reach (\(areas.joined(separator: ", ")))")
-            + ", and anything outside your home folder."
+            + (model.fullDiskAccess || model.demo ? ", and anything outside your home folder." : ", folders macOS hides without Full Disk Access, and anything outside your home folder.")
     }
 
     private func hero(_ s: Snapshot) -> some View {
@@ -127,7 +127,7 @@ struct TierTile: View {
         let userRun = accounting.userRunItems(tier: tier).count
         let unmeasured = accounting.unmeasuredCount(tier: tier)
         // Lead with the largest destination; the others follow, never added to it.
-        let order = Destination.allCases.sorted { r[$0] > r[$1] }
+        let order = Destination.allCases.sorted { r[$0] != r[$1] ? r[$0] > r[$1] : Destination.allCases.firstIndex(of: $0)! < Destination.allCases.firstIndex(of: $1)! }
         let phrase: [Destination: String] = [.mac: "right away", .trash: "after emptying the Trash", .containerDisk: "inside Docker's disk"]
         let bound = { (d: Destination) in r.boundPrefix(d) + formatBytes(r[d]) }
         let extras = (userRun > 0 ? " \(plural(userRun, "item")) you run yourself." : "") + (unmeasured > 0 ? " \(unmeasured) not measured yet." : "")

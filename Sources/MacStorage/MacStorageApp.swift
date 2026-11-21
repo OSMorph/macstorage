@@ -112,6 +112,22 @@ struct SnapshotTour {
             model.section = section
             await shot(section.rawValue, window)
         }
+        // What a first scan stopped early looks like: some areas finished, the rest not, and
+        // no cleanup yet. Taken before the demo cleanup so the two states don't mix.
+        if var partial = model.snapshot {
+            let full = partial
+            partial.date = .now
+            partial.owners.removeAll { ["docker", "git"].contains($0.id) }
+            partial.folders = [:]
+            partial.coverage.removeAll { $0.area.hasPrefix("Docker") || $0.area.hasPrefix("Home folder") }
+            partial.coverage += ["Container engines", "Git checkouts", "Folder sizes"].map { CoverageEntry(area: $0, status: .stopped, detail: "Not finished: the scan was stopped.") }
+            model.setSnapshot(partial)
+            model.section = .overview
+            await shot("overview-partial-scan", window)
+            model.section = .coverage
+            await shot("coverage-partial-scan", window)
+            model.setSnapshot(full)
+        }
         model.show(owner: "docker", item: "docker/dockerBuildCache")
         await shot("owners-docker", window)
         model.show(owner: "docker", item: "docker/dockerUnusedVolumes")
@@ -136,19 +152,7 @@ struct SnapshotTour {
         model.show(owner: "go", item: "go/goModuleCache")
         await shot("owners-cleaned-item", window)
         let saved = model.snapshot
-        if var partial = saved {
-            // What a first scan stopped early looks like: some areas finished, the rest not.
-            let unfinished = ["Container engines", "Git checkouts", "Folder sizes"]
-            partial.owners.removeAll { ["docker", "git"].contains($0.id) }
-            partial.folders = [:]
-            partial.coverage.removeAll { $0.area.hasPrefix("Docker") || $0.area.hasPrefix("Home folder") }
-            partial.coverage += unfinished.map { CoverageEntry(area: $0, status: .stopped, detail: "Not finished: the scan was stopped.") }
-            model.setSnapshot(partial)
-            model.section = .overview
-            await shot("overview-partial-scan", window)
-            model.section = .coverage
-            await shot("coverage-partial-scan", window)
-        }
+        model.section = .overview
         model.setSnapshot(nil)
         await shot("welcome", window)
         model.setSnapshot(saved)

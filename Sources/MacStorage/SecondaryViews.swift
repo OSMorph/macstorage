@@ -199,7 +199,7 @@ struct CleanupsLog: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text(run.started.formatted(date: .abbreviated, time: .shortened))
-                        Text(run.progressText).foregroundStyle(.secondary)
+                        Text(run.summaryText).foregroundStyle(.secondary)
                         Spacer()
                         Text("\(freedText(run, .mac)) freed · \(run.stillInTrash.bytesText) in the Trash · \(freedText(run, .containerDisk)) in Docker's disk")
                             .monospacedDigit().foregroundStyle(.secondary)
@@ -241,7 +241,7 @@ struct CleanupView: View {
 
     var body: some View {
         if let s = model.snapshot, let plan = model.currentPlan {
-            let acc = Accounting(s, cleaned: model.actedOn)
+            let acc = Accounting(s, cleaned: model.actedOn)   // only which items remain matters here
             VStack(spacing: 0) {
                 List {
                     Text("Safe items are ticked for you. Probably-safe items start unticked. Review items only appear here once you've picked files in their details, and they only ever go to the Trash.")

@@ -85,10 +85,10 @@ struct ItemTable: View {
             TableColumn("Item") { i in Text(i.name) }
             TableColumn("On disk") { i in MeasureText(measure: i.onDisk) }.width(100)
             TableColumn("Reclaimable") { i in
-                if accounting.cleaned.contains(i.id) {
-                    Text("Cleaned since this scan").foregroundStyle(.secondary)
-                } else if model.cleanupState.partlyCleaned[i.id] != nil {
+                if accounting.partlyCleaned.contains(i.id) {
                     Text("Partly cleaned since this scan").foregroundStyle(.secondary)
+                } else if accounting.cleaned.contains(i.id) {
+                    Text("Cleaned since this scan").foregroundStyle(.secondary)
                 } else if i.tier == .leaveAlone || i.tier == .notRemovable {
                     Text("0 bytes").foregroundStyle(.secondary)
                 } else {

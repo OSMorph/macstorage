@@ -11,12 +11,11 @@ public struct CleanupStep: Codable, Equatable, Identifiable, Sendable {
 
     public var id: String { item.id }
 
-    /// "≤ " when the expected figure is an upper bound, "≥ " when it's a lower bound.
+    /// "≤ " when the expected figure is an upper bound, "≥ " when it's a lower bound (even
+    /// of zero: a walk that read nothing isn't an exact zero).
     public var boundPrefix: String {
-        guard expectedBytes > 0 else { return "" }
-        if item.reclaimableIsUpperBound { return "≤ " }
         if case .atLeast = item.reclaimable, item.action != .pickToTrash { return "≥ " }
-        return ""
+        return item.reclaimableIsUpperBound && expectedBytes > 0 ? "≤ " : ""
     }
 
     /// The expected figure with its bound: "≤ 7.5 GB".
@@ -70,7 +69,7 @@ public struct CleanupPlan: Codable, Equatable, Sendable {
     public func expectedText(_ d: Destination) -> String {
         let prefixes = Set(steps.filter { $0.destination == d }.map(\.boundPrefix))
         let prefix = prefixes.contains("≤ ") ? "≤ " : prefixes.contains("≥ ") ? "≥ " : ""
-        return (expected(d) > 0 ? prefix : "") + ByteFormat.string(expected(d))
+        return prefix + ByteFormat.string(expected(d))
     }
 
     /// Steps holding files the user picked themselves. They need an extra confirmation.
@@ -231,6 +230,16 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
         "\(doneCount) of \(plural(steps.count, "step")) done" + (partialCount > 0 ? ", \(partialCount) partly done" : "")
     }
 
+    /// "11 of 13 steps done, 1 partly done, 1 skipped." The same everywhere a run is summed up.
+    public var summaryText: String {
+        func count(_ match: (StepOutcome) -> Bool) -> Int { steps.filter { match($0.outcome) }.count }
+        let skipped = count { if case .skipped = $0 { true } else { false } }
+        let failed = count { if case .failed = $0 { true } else { false } }
+        let notRun = count { if case .notRun = $0 { true } else { false } }
+        return progressText + (skipped > 0 ? ", \(skipped) skipped" : "") + (failed > 0 ? ", \(failed) failed" : "")
+            + (notRun > 0 ? ", \(notRun) not run" : "") + "."
+    }
+
     /// Re-measured bytes freed per destination.
     public func freed(_ d: Destination) -> Int64 {
         steps.filter { $0.step.destination == d }.compactMap(\.outcome.measured).reduce(0, +)
@@ -292,13 +301,13 @@ public enum Receipt {
     /// with its outcome, then what ran, what moved, what was left alone, and the approved list.
     public static func text(_ run: RunRecord) -> String {
         var lines = ["macstorage cleanup receipt",
-                     "Started \(run.started.formatted(date: .abbreviated, time: .shortened)), \(run.progressText)", ""]
+                     "Started \(run.started.formatted(date: .abbreviated, time: .shortened)): \(run.summaryText)", ""]
         for r in run.steps {
             let s = r.step, title = "\(s.ownerName) · \(s.item.name)"
             let freed = { (m: Int64?) in m.map { "\(ByteFormat.string($0)) \(s.destination == .trash ? "moved to the Trash" : s.destination == .containerDisk ? "freed inside Docker's disk" : "freed"), measured" + (s.item.kind.measurementNote.map { " " + $0 } ?? "") }
                 ?? "predicted \(s.expectedText), not re-measured" }
             switch r.outcome {
-            case .done(let m): lines.append("DONE · \(title) · \(freed(m))" + (m == nil ? "" : " (predicted \(s.expectedText))"))
+            case .done(let m): lines.append("\(r.leftAlone.isEmpty ? "DONE" : "PARTLY DONE (some left alone)") · \(title) · \(freed(m))" + (m == nil ? "" : " (predicted \(s.expectedText))"))
             case .partial(let m, let problems): lines.append("PARTLY DONE · \(title) · \(freed(m))"); lines += problems.map { "  Problem: \($0)" }
             case .skipped(let why): lines.append("SKIPPED · \(title) · \(why) Nothing was removed.")
             case .notRun(let why): lines.append("NOT RUN · \(title) · \(why)")
@@ -362,7 +371,9 @@ public struct CleanupState: Equatable, Sendable {
         // A changed list stays unticked until a new scan. Trash steps skip for reasons that
         // pass (a running app), so they stay ticked.
         if case .skipped = r.outcome {
-            if r.step.destination != .trash { skipped.insert(id) }
+            // A Trash step skipped because an app was running stays ticked; one whose targets
+            // all changed can't succeed until a new scan.
+            if r.step.destination != .trash || !r.leftAlone.isEmpty { skipped.insert(id) }
             return
         }
         guard r.outcome.didRun else { return }

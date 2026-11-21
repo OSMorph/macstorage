@@ -555,7 +555,6 @@ final class VolumeTests: XCTestCase {
     }
 }
 
-@MainActor
 final class FolderMeasurementsTests: XCTestCase {
     var home: URL!
     let names = (1...10).map { "entry\($0)" }
@@ -579,7 +578,7 @@ final class FolderMeasurementsTests: XCTestCase {
             self.listDelay = listDelay
         }
 
-        func measurements(home: String) -> FolderMeasurements {
+        @MainActor func measurements(home: String) -> FolderMeasurements {
             FolderMeasurements(home: home, list: { folder in
                 self.lock.withLock { self.reads.append(folder) }
                 Thread.sleep(forTimeInterval: self.listDelay)
@@ -592,7 +591,7 @@ final class FolderMeasurementsTests: XCTestCase {
         }
     }
 
-    func waitUntil(_ condition: () -> Bool) async throws {
+    @MainActor func waitUntil(_ condition: @escaping @MainActor () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(10)
         while !condition() {
             guard Date() < deadline else { return XCTFail("timed out") }
@@ -600,7 +599,7 @@ final class FolderMeasurementsTests: XCTestCase {
         }
     }
 
-    func testALevelIsListedAndMeasured() async throws {
+    @MainActor func testALevelIsListedAndMeasured() async throws {
         let m = Disk(names: names).measurements(home: home.path)
         m.open("~/A", owners: [], protected: [])
         try await waitUntil { m.levels["~/A"]?.isMeasuring == false }
@@ -609,7 +608,7 @@ final class FolderMeasurementsTests: XCTestCase {
         XCTAssertNil(m.measuring)
     }
 
-    func testLeavingPausesAndReturningResumesWithoutDuplicates() async throws {
+    @MainActor func testLeavingPausesAndReturningResumesWithoutDuplicates() async throws {
         let m = Disk(names: names, delay: 0.03).measurements(home: home.path)
         m.open("~/A", owners: [], protected: [])
         try await waitUntil { (m.levels["~/A"]?.measured ?? 0) >= 3 }
@@ -623,7 +622,7 @@ final class FolderMeasurementsTests: XCTestCase {
         XCTAssertEqual(m.levels["~/A"]?.entries.map(\.name).sorted(), names.sorted(), "each entry once")
     }
 
-    func testForgottenLevelsDontComeBack() async throws {
+    @MainActor func testForgottenLevelsDontComeBack() async throws {
         let m = Disk(names: names, delay: 0.03).measurements(home: home.path)
         m.open("~/A", owners: [], protected: [])
         try await waitUntil { (m.levels["~/A"]?.measured ?? 0) >= 1 }
@@ -633,7 +632,7 @@ final class FolderMeasurementsTests: XCTestCase {
         XCTAssertNil(m.measuring)
     }
 
-    func testALevelLeftWhileListingIsDropped() async throws {
+    @MainActor func testALevelLeftWhileListingIsDropped() async throws {
         let m = Disk(names: names, listDelay: 0.2).measurements(home: home.path)
         m.open("~/A", owners: [], protected: [])
         m.open("~/B", owners: [], protected: [])
@@ -642,7 +641,7 @@ final class FolderMeasurementsTests: XCTestCase {
         XCTAssertNil(m.levels["~/A"], "its listing arriving late doesn't bring it back")
     }
 
-    func testARefusedFolderIsNeverRead() async throws {
+    @MainActor func testARefusedFolderIsNeverRead() async throws {
         let disk = Disk(names: names)
         let m = disk.measurements(home: home.path)
         m.open("~/Downloads", owners: [], protected: [home.appending(path: "Downloads").path])

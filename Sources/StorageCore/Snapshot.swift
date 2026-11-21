@@ -33,6 +33,23 @@ public struct Snapshot: Codable, Equatable, Sendable {
 
     /// Areas the scan didn't finish.
     public var unfinishedAreas: [String] { coverage.filter { $0.status == .stopped }.map(\.area) }
+
+    /// The snapshot with sizes that can't be true marked as not measured: an item on the
+    /// Mac larger than the disk's used space (version 0.1.0 read each macOS volume's size
+    /// as the whole APFS container's), and a Data volume larger than that space.
+    /// Sizes inside a VM are left alone: they describe the VM's disk, not the Mac's.
+    public func removingImpossibleSizes() -> Snapshot {
+        var s = self
+        let used = disk.used
+        s.disk.dataVolumeUsed = min(disk.dataVolumeUsed, used)
+        for o in s.owners.indices where s.owners[o].hostBytes == nil && s.owners[o].hostSizeUnknown != true {
+            for i in s.owners[o].items.indices where (s.owners[o].items[i].onDisk.bytes ?? 0) > used {
+                s.owners[o].items[i].onDisk = .notMeasured
+                if (s.owners[o].items[i].reclaimable.bytes ?? 0) > used { s.owners[o].items[i].reclaimable = .notMeasured }
+            }
+        }
+        return s
+    }
 }
 
 public struct DiskUsage: Codable, Equatable, Sendable {

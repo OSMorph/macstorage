@@ -469,6 +469,29 @@ final class CleanupSafetyTests: XCTestCase {
     }
 }
 
+final class VolumeTests: XCTestCase {
+    /// On this Mac: each volume reports its own used space, so together they fit in the
+    /// container's (statfs reported the whole container for each one).
+    func testVolumesFitInTheDisksUsedSpace() async throws {
+        let disk = SystemProvider.diskUsage()
+        let data = try XCTUnwrap(SystemProvider.volumeUsed("/System/Volumes/Data"))
+        XCTAssertGreaterThan(data, 0)
+        XCTAssertEqual(disk.dataVolumeUsed, min(data, disk.used))
+        let result = await SystemProvider().scan(ScanContext(tools: FakeTools(), home: NSTemporaryDirectory(), fullDiskAccess: true))
+        let macos = try XCTUnwrap(result.owners.first { $0.id == "macos" })
+        XCTAssertEqual(result.coverage.first?.status, .measured, result.coverage.first?.detail ?? "")
+        let system = try XCTUnwrap(macos.items.first { $0.name == "System volume" }?.onDisk.bytes)
+        XCTAssertGreaterThan(system, 1_000_000_000)
+        XCTAssertLessThan(macos.onDisk + data, disk.used + disk.total / 50, "the volumes overlap: some report the container")
+    }
+
+    func testAFolderIsntAVolume() {
+        XCTAssertTrue(SystemProvider.isMountPoint("/"))
+        XCTAssertFalse(SystemProvider.isMountPoint(NSTemporaryDirectory()))
+        XCTAssertNil(SystemProvider.volumeUsed("/System/Volumes/Data/private"))
+    }
+}
+
 final class ScannerTests: XCTestCase {
     struct Slow: Provider {
         let area = "Slow"

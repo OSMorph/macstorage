@@ -149,7 +149,7 @@ public struct Scanner: Sendable {
         Snapshot(date: started, scanDuration: Date().timeIntervalSince(started), disk: SystemProvider.diskUsage(),
                  // Keep owners with a size, or one that's unknown or a lower bound (even of zero).
                  owners: owners.filter { $0.onDisk > 0 || $0.items.contains { !$0.onDisk.isExact } }.sorted { $0.onDisk > $1.onDisk },
-                 coverage: coverage.sorted { $0.area < $1.area }, folders: folders)
+                 coverage: coverage.sorted { $0.area < $1.area }, folders: folders).removingImpossibleSizes()
     }
 }
 

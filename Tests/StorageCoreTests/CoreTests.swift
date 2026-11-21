@@ -130,6 +130,34 @@ final class AccountingTests: XCTestCase {
         XCTAssertEqual(Accounting(s).diskSegments.map(\.bytes).reduce(0, +), s.disk.total)
     }
 
+    func testImpossibleSizesBecomeNotMeasured() {
+        // A saved 0.1.0 scan: every macOS volume read as the container's used space, 4 × 663 GB.
+        var s = Demo.snapshot()
+        let used = s.disk.used
+        let macos = s.owners.firstIndex { $0.id == "macos" }!
+        s.owners[macos].items = (0..<4).map { var item = s.owners[macos].items[0]; item.id += "\($0)"; item.onDisk = .bytes(used); return item }
+        s.owners[macos].items[0].onDisk = .bytes(used + 1)
+        s.disk.dataVolumeUsed = used + 5
+        let docker = s.owners.firstIndex { $0.id == "docker" }!
+        s.owners[docker].items[0].onDisk = .bytes(used + 1)
+        let fixed = s.removingImpossibleSizes()
+        XCTAssertEqual(fixed.owners[macos].items[0].onDisk, .notMeasured)
+        XCTAssertEqual(fixed.owners[macos].items[1].onDisk, .bytes(used), "a size up to the used space can't be ruled out on its own")
+        XCTAssertEqual(fixed.disk.dataVolumeUsed, used)
+        XCTAssertEqual(fixed.owners[docker].items[0].onDisk, .bytes(used + 1), "sizes inside a VM aren't the Mac's")
+        let demo = Demo.snapshot()
+        XCTAssertEqual(demo.removingImpossibleSizes(), demo)
+    }
+
+    func testAnOwnerWithNothingMeasuredShowsNotMeasured() {
+        var s = Demo.snapshot()
+        let i = s.owners.firstIndex { $0.id == "macos" }!
+        s.owners[i].items[0].onDisk = .notMeasured
+        XCTAssertEqual(s.owners[i].onDiskMeasure, .notMeasured)
+        XCTAssertEqual(s.owners.first { $0.id == "nix" }?.onDiskMeasure, .bytes(Demo.gb(16.7) + Demo.gb(98)), "one unmeasured item among measured ones")
+        XCTAssertEqual(Accounting(s).diskSegments.map(\.bytes).reduce(0, +), s.disk.total)
+    }
+
     func testOnHostLeavesOutDockersDisk() {
         var r = Reclaimable()
         r.byDestination = [.mac: 1, .trash: 2, .containerDisk: 4]
@@ -356,6 +384,25 @@ final class HistoryTests: XCTestCase {
         XCTAssertTrue(h.changes(from: 1, to: 2).isEmpty)
         XCTAssertTrue(h.changes(from: 0, to: 2).isEmpty, "no change across the gap")
         XCTAssertEqual(h.scans[1].size("docker"), nil)
+    }
+
+    func testASizeLargerThanTheUsedSpaceIsAGap() {
+        // Version 0.1.0 recorded each macOS volume as the whole container (2.7 TB on a 1 TB disk).
+        let day: TimeInterval = 86_400
+        let old = ScanSummary(date: Date(timeIntervalSince1970: 0), used: 663, free: 332, owners: ["macos": 2_650, "go": 10], names: [:])
+        let new = ScanSummary(date: Date(timeIntervalSince1970: day), used: 665, free: 330, owners: ["macos": 30, "go": 12], names: [:])
+        XCTAssertNil(old.size("macos"))
+        XCTAssertEqual(old.size("go"), 10)
+        let changes = History(scans: [old, new]).changes(from: 0, to: 1)
+        XCTAssertEqual(changes.map(\.ownerID), ["go"], "no 'macOS shrank 2.6 TB'")
+    }
+
+    func testAnOwnerWithNothingMeasuredIsUnmeasuredInHistory() {
+        var s = Demo.snapshot()
+        let i = s.owners.firstIndex { $0.id == "macos" }!
+        s.owners[i].items[0].onDisk = .notMeasured
+        XCTAssertNil(ScanSummary(s).size("macos"))
+        XCTAssertNotNil(ScanSummary(s).size("go"))
     }
 
     func testComparingAScanWithItselfIsEmpty() {

@@ -305,11 +305,12 @@ public struct Owner: Codable, Identifiable, Equatable, Sendable {
     /// couldn't be measured (the sizes inside a VM say nothing reliable about the disk file).
     public var hostOnDisk: Int64 { hostSizeUnknown == true ? 0 : onDisk }
 
-    /// `onDisk` as shown: unknown when the VM disk couldn't be measured, a lower bound when
-    /// an item's size is.
+    /// `onDisk` as shown: unknown when the VM disk couldn't be measured, not measured when
+    /// none of its items was, a lower bound when an item's size is.
     public var onDiskMeasure: Measure {
         if hostSizeUnknown == true { return .unknown }
         guard hostBytes == nil else { return .bytes(onDisk) }
+        if !items.isEmpty, items.allSatisfy({ $0.onDisk.bytes == nil }) { return .notMeasured }
         let partial = items.contains { if case .atLeast = $0.onDisk { true } else { false } }
         return partial ? .atLeast(onDisk) : .bytes(onDisk)
     }

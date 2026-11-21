@@ -75,7 +75,7 @@ public enum Demo {
             owner("logs", "Logs", .system, "~/Library/Logs", [
                 Fact(.appLogs, onDisk: .bytes(840_000_000), targets: list(884, { "~/Library/Logs/DiagnosticReports/report-\($0).log" }, bytes: 840_000_000)),
             ]),
-            owner("macos", "macOS", .system, "System, Preboot, Recovery and VM volumes", ownVolume: true, [
+            owner("macos", "macOS", .system, "System, Preboot, VM and Update volumes", ownVolume: true, [
                 Fact(.macOSVolume, onDisk: .bytes(gb(50.5))),
             ]),
         ]

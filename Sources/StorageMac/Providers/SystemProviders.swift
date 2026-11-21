@@ -14,21 +14,45 @@ public struct SystemProvider: Provider {
         let v = try? URL(fileURLWithPath: "/").resourceValues(forKeys: keys)
         let total = Int64(v?.volumeTotalCapacity ?? 0), free = Int64(v?.volumeAvailableCapacity ?? 0)
         let important = v?.volumeAvailableCapacityForImportantUsage ?? free
-        return DiskUsage(total: total, free: free, purgeable: max(0, important - free), dataVolumeUsed: volumeUsed("/System/Volumes/Data") ?? 0)
+        return DiskUsage(total: total, free: free, purgeable: max(0, important - free),
+                         dataVolumeUsed: min(volumeUsed("/System/Volumes/Data") ?? 0, total - free))
     }
 
-    /// Bytes used on the APFS volume mounted at `path` (its own consumption, not the container's).
-    static func volumeUsed(_ path: String) -> Int64? {
+    /// True when a volume is mounted at `path` (not just a folder on the volume above it).
+    static func isMountPoint(_ path: String) -> Bool {
         var fs = statfs()
-        guard statfs(path, &fs) == 0 else { return nil }
-        return Int64(fs.f_blocks - fs.f_bfree) * Int64(fs.f_bsize)
+        guard statfs(path, &fs) == 0 else { return false }
+        let mountedOn = withUnsafeBytes(of: &fs.f_mntonname) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        return mountedOn == path
     }
+
+    /// Bytes used by the APFS volume mounted at `path`: its own space, not its container's
+    /// (`statfs` reports the whole container's used space for every APFS volume). Nil when
+    /// no volume is mounted there or it doesn't say.
+    static func volumeUsed(_ path: String) -> Int64? {
+        guard isMountPoint(path) else { return nil }
+        var request = attrlist()
+        request.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        request.commonattr = attrgroup_t(ATTR_CMN_RETURNED_ATTRS)
+        request.volattr = attrgroup_t(ATTR_VOL_INFO) | attrgroup_t(ATTR_VOL_SPACEUSED)
+        var buffer = [UInt8](repeating: 0, count: 64)
+        guard getattrlist(path, &request, &buffer, buffer.count, 0) == 0 else { return nil }
+        // The reply: its length, the attributes returned (five groups: common, volume, dir,
+        // file, fork), then the space used. The volume can decline to return it.
+        return buffer.withUnsafeBytes { raw -> Int64? in
+            let returned = raw.loadUnaligned(fromByteOffset: 8, as: attrgroup_t.self)
+            guard returned & attrgroup_t(ATTR_VOL_SPACEUSED) != 0 else { return nil }
+            return raw.loadUnaligned(fromByteOffset: 4 + MemoryLayout<attribute_set_t>.size, as: Int64.self)
+        }
+    }
+
+    static let volumes = ["/": "System volume", "/System/Volumes/Preboot": "Preboot", "/System/Volumes/VM": "Swap and sleep image", "/System/Volumes/Update": "Staged updates"]
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
-        let volumes = ["/": "System volume", "/System/Volumes/Preboot": "Preboot", "/System/Volumes/VM": "Swap and sleep image", "/System/Volumes/Update": "Staged updates"]
-        let facts = volumes.sorted { $0.key < $1.key }.compactMap { path, name in
-            Self.volumeUsed(path).map { Fact(.macOSVolume, key: name, name: name, onDisk: .bytes($0)) }
-        }
+        // A volume that's mounted but can't be measured stays listed, as not measured.
+        let mounted = Self.volumes.sorted { $0.key < $1.key }.filter { Self.isMountPoint($0.key) }
+        let facts = mounted.map { path, name in Fact(.macOSVolume, key: name, name: name, onDisk: Self.volumeUsed(path).map(Measure.bytes) ?? .notMeasured) }
+        let failed = facts.filter { $0.onDisk.bytes == nil }.compactMap(\.name)
         var owners = [Owner(id: "macos", name: "macOS", kind: .system, location: "System, Preboot, VM and Update volumes", isOwnVolume: true, items: facts.map(Rules.item))]
         let clt = "/Library/Developer/CommandLineTools"
         if ctx.exists(clt) {
@@ -37,7 +61,10 @@ public struct SystemProvider: Provider {
             owners.append(Owner(id: "clt", name: "Command Line Tools", kind: .system, location: clt,
                                 items: [Rules.item(Fact(.commandLineTools, onDisk: size.onDisk, path: clt))]))
         }
-        return ProviderResult(owners: owners, coverage: [CoverageEntry(area: area, status: .measured, detail: "Disk capacity, purgeable space and macOS volumes.")])
+        let coverage = failed.isEmpty
+            ? CoverageEntry(area: area, status: .measured, detail: "Disk capacity, purgeable space and macOS volumes.")
+            : CoverageEntry(area: area, status: .failed, detail: "Disk capacity and purgeable space measured; macOS didn't report the size of: \(failed.joined(separator: ", ")).")
+        return ProviderResult(owners: owners, coverage: [coverage])
     }
 }
 

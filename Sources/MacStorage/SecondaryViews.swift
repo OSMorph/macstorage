@@ -166,7 +166,7 @@ struct HistoryView: View {
             TableColumn("Owner") { (c: OwnerChange) in Text(c.name) }
             TableColumn("Change") { (c: OwnerChange) in
                 Label(c.delta > 0 ? "grew \(formatBytes(c.delta))" : "shrank \(formatBytes(-c.delta))", systemImage: c.delta > 0 ? "arrow.up" : "arrow.down")
-                    .foregroundStyle(c.delta > 0 ? .red : .green).monospacedDigit()
+                    .foregroundStyle(c.delta > 0 ? Color.errorText : Color.successText).monospacedDigit()
             }.width(150)
             TableColumn("Last scans") { (c: OwnerChange) in
                 Chart(Array(c.series.enumerated()), id: \.offset) { LineMark(x: .value("i", $0.offset), y: .value("b", Double($0.element))) }
@@ -174,7 +174,7 @@ struct HistoryView: View {
             }.width(100)
             TableColumn("Why") { (c: OwnerChange) in Text(c.notes.joined(separator: "; ")).foregroundStyle(.secondary) }
         })
-        .frame(height: CGFloat(max(changes.count, 1)) * 26 + 34)
+        .frame(height: CGFloat(max(changes.count, 1)) * 30 + 40)
     }
 
     private func label(_ s: ScanSummary) -> String { s.date.formatted(date: .abbreviated, time: .omitted) }
@@ -194,7 +194,7 @@ struct CleanupsLog: View {
                         Text(run.started.formatted(date: .abbreviated, time: .shortened))
                         Text(run.progressText).foregroundStyle(.secondary)
                         Spacer()
-                        Text("\(formatBytes(run.freedOnMac)) freed · \(formatBytes(run.stillInTrash.map(\.bytes).reduce(0, +))) in the Trash · \(formatBytes(run.freed(.containerDisk))) in Docker's disk")
+                        Text("\(freedText(run, .mac)) freed · \(formatBytes(run.stillInTrash.map(\.bytes).reduce(0, +))) in the Trash · \(freedText(run, .containerDisk)) in Docker's disk")
                             .monospacedDigit().foregroundStyle(.secondary)
                         Button(open.contains(run.id) ? "Hide receipt" : "View receipt") { toggle(run.id) }.buttonStyle(.link)
                     }
@@ -292,11 +292,11 @@ struct CleanupView: View {
                     Text("\(plural(plan.steps.count, "step")) · \(formatBytes(plan.expected(.mac), upperBound: plan.isUpperBound(.mac))) right away, \(formatBytes(plan.expected(.trash), upperBound: plan.isUpperBound(.trash))) after emptying the Trash, \(formatBytes(plan.expected(.containerDisk), upperBound: plan.isUpperBound(.containerDisk))) inside Docker's disk")
                         .foregroundStyle(.secondary)
                     Spacer()
-                    if model.scanIsTooOld {
-                        Text("The last scan is more than a day old. Scan again before cleaning up, so the lists are current.").font(.caption).foregroundStyle(Color.warningText)
+                    if let why = model.cleanupBlocked {
+                        Text(why).font(.caption).foregroundStyle(Color.warningText)
                     }
                     Button("Preview cleanup…", action: model.openPreview).buttonStyle(.borderedProminent)
-                        .disabled(plan.steps.isEmpty || model.scanIsTooOld).keyboardShortcut(.defaultAction)
+                        .disabled(plan.steps.isEmpty || model.cleanupBlocked != nil).keyboardShortcut(.defaultAction)
                 }
                 .padding(12)
             }

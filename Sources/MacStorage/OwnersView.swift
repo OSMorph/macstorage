@@ -148,13 +148,13 @@ struct Inspector: View {
             }
         } else {
             if let runID = model.cleanupState.partlyCleaned[item.id] {
-                Callout("Partly cleaned today: some of the list was removed before a problem stopped the step. Sizes are from before; scan again for a current list.") {
+                Callout("Partly cleaned today: some of the list was removed, and the rest was left alone or stopped by a problem (the receipt says which). Sizes are from before; scan again for a current list.") {
                     Button("View its receipt") { model.section = .history; model.openRunID = runID }.buttonStyle(.link)
                 }
             }
             TierBadge(tier: item.tier)
             HStack(spacing: 8) {
-                SizeBox(value: MeasureText(measure: item.onDisk), caption: item.sharedBytes.map { "on disk (+ \(formatBytes($0)) shared with other files)" } ?? "on disk")
+                SizeBox(value: MeasureText(measure: item.onDisk), caption: item.sharedBytes.map { "on disk, including \(formatBytes($0)) shared with clones elsewhere" } ?? "on disk")
                 SizeBox(value: reclaimValue(item), caption: reclaimCaption(item))
             }
             Text(item.explanation).fixedSize(horizontal: false, vertical: true)

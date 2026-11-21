@@ -15,21 +15,29 @@ public struct NixProvider: Provider {
             return ProviderResult(coverage: [ctx.unavailable("nix-store", area: area, what: "Nix")])
         }
         let paths = Parse.paths(dead)
-        var deadBytes: Int64 = 0
+        var deadBytes: Int64 = 0, unsized = 0
         for batch in stride(from: 0, to: paths.count, by: 1_000).map({ Array(paths[$0..<min($0 + 1_000, paths.count)]) }) {
-            deadBytes += Parse.nixSizes(await ctx.output("nix-store", ["-q", "--size"] + batch, timeout: .seconds(120)) ?? "")
+            if let sizes = await ctx.output("nix-store", ["-q", "--size"] + batch, timeout: .seconds(120)) {
+                deadBytes += Parse.nixSizes(sizes)
+            } else {
+                unsized += batch.count
+            }
         }
+        // Paths Nix couldn't size make the dead total a lower bound, and the rest unknown.
+        let sized = unsized == 0
         let generations = ((try? FileManager.default.contentsOfDirectory(atPath: "/nix/var/nix/profiles")) ?? [])
             .filter { $0.hasPrefix("system-") && $0.hasSuffix("-link") }.count
         let total = SystemProvider.volumeUsed("/nix") ?? 0
         let facts = [
-            Fact(.nixDeadPaths, onDisk: .bytes(deadBytes), targets: paths.map { Target($0) }, path: "/nix/store", counts: ["paths": paths.count]),
+            Fact(.nixDeadPaths, onDisk: sized ? .bytes(deadBytes) : .atLeast(deadBytes), targets: paths.map { Target($0) }, path: "/nix/store", counts: ["paths": paths.count]),
             Fact(.nixOldGenerations, onDisk: .notMeasured, reclaimable: .notMeasured, counts: ["generations": max(0, generations - 1)]),
-            Fact(.nixLive, onDisk: .bytes(max(0, total - deadBytes))),
+            Fact(.nixLive, onDisk: sized ? .bytes(max(0, total - deadBytes)) : .notMeasured),
         ]
         return ProviderResult(owners: [Owner(id: "nix", name: "Nix store", kind: .developerTools, location: "/nix (its own APFS volume)",
                                              isOwnVolume: true, items: facts.map(Rules.item))],
-                              coverage: [CoverageEntry(area: area, status: .measured, detail: "\(plural(paths.count, "dead path")) sized; old generations not measured yet.")])
+                              coverage: [CoverageEntry(area: area, status: sized ? .measured : .failed,
+                                                       detail: sized ? "\(plural(paths.count, "dead path")) sized; old generations not measured yet."
+                                                           : "\(plural(paths.count, "dead path")) found, but Nix couldn't size \(unsized) of them, so the dead total is a lower bound.")])
     }
 }
 
@@ -42,9 +50,13 @@ public struct LanguageCachesProvider: Provider {
 
     /// A cache the tool can clear itself, found by asking the tool where it is. Only used when
     /// the tool answers: the executor asks it again before clearing.
-    private func clearable(_ ctx: ScanContext, _ kind: ItemKind, ask tool: String, _ args: [String]) async -> Fact? {
-        guard let reported = await ctx.output(tool, args)?.split(separator: "\n").first.map({ String($0).trimmingCharacters(in: .whitespaces) }),
-              reported.hasPrefix("/"), let identity = FileSizes.directoryIdentity(reported), !ctx.isProtected(reported) else { return nil }
+    /// Returns the fact, or a coverage entry when the tool is installed but didn't answer.
+    private func clearable(_ ctx: ScanContext, _ kind: ItemKind, ask tool: String, _ args: [String]) async -> (Fact?, CoverageEntry?) {
+        guard let answer = await ctx.output(tool, args) else {
+            return (nil, ctx.tools.isInstalled(tool) ? ctx.unavailable(tool, area: "\(tool) cache", what: tool) : nil)
+        }
+        guard let reported = answer.split(separator: "\n").first.map({ String($0).trimmingCharacters(in: .whitespaces) }),
+              reported.hasPrefix("/"), let identity = FileSizes.directoryIdentity(reported), !ctx.isProtected(reported) else { return (nil, nil) }
         // Listed through the real path, so a symlinked cache folder shows what's really in it.
         let options = ctx.walk(), real = FileSizes.realPath(reported) ?? reported
         let (targets, size) = await offload { FileSizes.manifest(real, options) }
@@ -52,7 +64,7 @@ public struct LanguageCachesProvider: Provider {
                         targets: targets, root: reported)
         fact.targetsComplete = size.isComplete
         fact.scopeGuard = .folder(identity)
-        return fact
+        return (fact, nil)
     }
 
     /// A folder the app moves to the Trash as a whole, or one only the user handles.
@@ -79,9 +91,11 @@ public struct LanguageCachesProvider: Provider {
             pnpm = Fact(.pnpmStore, onDisk: s.onDisk, reclaimable: s.reclaimable, path: root)
         }
 
-        let go = [await goMod, await goBuild].compactMap { $0 }
-        let node = [await npm, pnpm, await folder(ctx, .voltaToolchains, "~/.volta")].compactMap { $0 }
-        let python = [await uv, await pip, await folder(ctx, .poetryCache, "~/Library/Caches/pypoetry"), await folder(ctx, .pyenvVersions, "~/.pyenv/versions")].compactMap { $0 }
+        let asked = [await goMod, await goBuild, await npm, await uv, await pip]
+        let failures = asked.compactMap(\.1)
+        let go = [asked[0].0, asked[1].0].compactMap { $0 }
+        let node = [asked[2].0, pnpm, await folder(ctx, .voltaToolchains, "~/.volta")].compactMap { $0 }
+        let python = [asked[3].0, asked[4].0, await folder(ctx, .poetryCache, "~/Library/Caches/pypoetry"), await folder(ctx, .pyenvVersions, "~/.pyenv/versions")].compactMap { $0 }
         let settings = (ctx.tools as? Shell)?.tools.cacheSettings ?? [:]
         let cargo = settings["CARGO_HOME"] ?? "~/.cargo", rustup = settings["RUSTUP_HOME"] ?? "~/.rustup", gradle = settings["GRADLE_USER_HOME"] ?? "~/.gradle"
         let rust = [await folder(ctx, .cargoRegistry, cargo + "/registry"), await folder(ctx, .rustupToolchains, rustup + "/toolchains")].compactMap { $0 }
@@ -91,7 +105,7 @@ public struct LanguageCachesProvider: Provider {
             facts.isEmpty ? nil : Owner(id: id, name: name, kind: .developerTools,
                                         location: facts.compactMap(\.path).map(ctx.display).joined(separator: ", "), items: facts.map(Rules.item))
         }
-        return ProviderResult(owners: owners, coverage: [CoverageEntry(area: area, status: .measured, detail: owners.map(\.name).joined(separator: ", ") + ".")])
+        return ProviderResult(owners: owners, coverage: [CoverageEntry(area: area, status: .measured, detail: owners.map(\.name).joined(separator: ", ") + ".")] + failures)
     }
 }
 

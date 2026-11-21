@@ -72,6 +72,8 @@ final class AppModel {
     private(set) var unsavedRuns: [UUID: String] = [:]
     /// Set while a cleanup is stopping (after "Stop after this step" or Quit).
     private(set) var stopping = false
+    /// Set when the in-progress record couldn't be saved during the run.
+    private(set) var journalFailed = false
     private(set) var fullDiskAccess = FullDiskAccess.isGranted
 
     private var scanTask: Task<Void, Never>?
@@ -107,7 +109,9 @@ final class AppModel {
         self.history = history
         cleanupState = CleanupState(runs: history.runs, after: snapshot.date)
         dropRemovedPicks()
+        // Safe items start ticked, except what a cleanup since this scan cleaned or skipped.
         selected = Set(snapshot.owners.flatMap(\.items).filter { $0.tier == .safe && $0.isAutomaticCleanup && cleaned[$0.id] == nil }.map(\.id))
+            .subtracting(cleanupState.skipped)
     }
 
     /// Picked entries already in the Trash can't be picked again.
@@ -197,9 +201,16 @@ final class AppModel {
         Task { await save(scan) }
     }
 
-    /// Cleanup only runs from a recent, complete scan: targets from an old one may be stale.
+    /// Cleanup only runs from a recent, complete scan: targets from an old one may be stale,
+    /// and a stopped scan hasn't checked everything. Returns why cleanup is unavailable.
     static let maxScanAge: TimeInterval = 24 * 3600
-    var scanIsTooOld: Bool { !demo && (snapshot.map { Date().timeIntervalSince($0.date) > Self.maxScanAge } ?? true) }
+    var cleanupBlocked: String? {
+        guard !demo, let snapshot else { return demo ? nil : "Scan first." }
+        if scanning != nil { return "Wait for the scan to finish." }
+        if snapshot.isPartial { return "This scan was stopped before it finished. Scan again before cleaning up." }
+        if Date().timeIntervalSince(snapshot.date) > Self.maxScanAge { return "The last scan is more than a day old. Scan again before cleaning up, so the lists are current." }
+        return nil
+    }
 
     // MARK: Cleanup
 
@@ -216,19 +227,23 @@ final class AppModel {
     }
 
     func openPreview() {
-        guard !scanIsTooOld, scanning == nil, let plan = plan(), !plan.steps.isEmpty else { return }
+        guard cleanupBlocked == nil, let plan = plan(), !plan.steps.isEmpty else { return }
         sheet = .preview(plan)
     }
 
     func run(_ plan: CleanupPlan) {
         stopSignal = StopSignal()
         stopping = false
+        journalFailed = false
         sheet = .running(plan, current: 0, outcomes: Array(repeating: nil, count: plan.steps.count))
         let stop = stopSignal, store = store, demo = demo
         Task {
             let report: @Sendable (Int, StepOutcome?) -> Void = { i, o in Task { @MainActor in self.progress(i, o) } }
             // Saved before each step, so quitting or a crash mid-run still leaves a record.
-            let journal: @Sendable (RunRecord) -> Void = { record in if !demo { try? store.save(record) } }
+            let journal: @Sendable (RunRecord) -> Void = { record in
+                guard !demo, (try? store.save(record)) == nil else { return }
+                Task { @MainActor in self.journalFailed = true }
+            }
             let record: RunRecord
             if demo {
                 record = await DemoExecutor.run(plan, stop: stop, progress: report)
@@ -252,12 +267,10 @@ final class AppModel {
 
     /// Records the run before showing results, so no way of closing the sheet loses it.
     private func finish(_ run: RunRecord) async {
-        for r in run.steps {
-            if r.outcome.didRun { cleanupState.record(r, run: run.id) }
-            // A step whose list changed stays out of the next cleanup until a new scan.
-            if case .skipped = r.outcome { selected.remove(r.step.item.id) }
-        }
+        for r in run.steps { cleanupState.record(r, run: run.id) }
+        // Cleaned steps leave Cleanup; a step whose list changed stays out until a new scan.
         selected.subtract(cleaned.keys)
+        selected.subtract(cleanupState.skipped)
         dropRemovedPicks()
         history.runs.insert(run, at: 0)
         await persist(run)
@@ -275,12 +288,13 @@ final class AppModel {
 
     func deleteFromTrash(_ run: RunRecord, includePicked: Bool) async {
         let chosen = run.stillInTrash.filter { includePicked || !$0.picked }
-        let demo = demo, store = store
+        // The record on disk is the full one, unless this session has changes it couldn't save.
+        let demo = demo, store = store, useMemory = demo || unsavedRuns[run.id] != nil
         // Deleting tens of gigabytes takes a while: keep it off the main actor. The deletion
         // is added to the full record, not the compact copy History loaded.
         let (deleted, refused, full) = await offload {
             let (deleted, refused) = demo ? (chosen, []) : CleanupExecutor.deleteFromTrash(chosen)
-            return (deleted, refused, demo ? run : store.fullRun(run.id) ?? run)
+            return (deleted, refused, useMemory ? run : store.fullRun(run.id) ?? run)
         }
         var updated = full
         updated.trashDeletions.append(.init(date: .now, deleted: deleted, refused: refused))

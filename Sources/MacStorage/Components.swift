@@ -285,6 +285,10 @@ struct TargetList: View {
                         HStack {
                             Text(t.id).font(.system(.caption, design: .monospaced)).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
                                 .help(t.id)
+                                .contextMenu {
+                                    Button("Copy Path") { copyToPasteboard(t.id) }
+                                    Button("Reveal in Finder") { revealInFinder(t.id) }
+                                }
                             Spacer()
                             if let b = t.bytes { Text(formatBytes(b)).font(.caption).foregroundStyle(.secondary).monospacedDigit() }
                         }

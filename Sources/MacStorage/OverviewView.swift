@@ -22,7 +22,7 @@ struct OverviewView: View {
                     }
                     Text("Biggest owners").font(.headline)
                     OwnerRanking(model: model, snapshot: s, accounting: acc)
-                    Text("In each bar, the solid part is what cleaning up gives back on your Mac (safe and probably-safe items, right away or via the Trash) and the faded part is the rest. Space freed inside Docker's disk isn't drawn: the disk file shrinks later. On disk counts hard links once; blocks shared between APFS clones count in each copy, and the shared part is noted per item.")
+                    Text("In each bar, the solid part is what cleaning up gives back on your Mac (safe and probably-safe items, right away or via the Trash) and the faded part is the rest. Space freed inside Docker's disk isn't drawn: the disk file shrinks later. On disk counts a hard-linked file once within each folder measured; blocks shared between APFS clones count in each copy, and the shared part is noted per item.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(20)

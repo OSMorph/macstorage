@@ -203,6 +203,11 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
         steps.filter { $0.step.destination == d && $0.outcome.didRun && $0.outcome.measured == nil }.map(\.step.expectedBytes).reduce(0, +)
     }
 
+    /// True when part of a destination's prediction was an upper bound.
+    public func predictionIsUpperBound(_ d: Destination) -> Bool {
+        steps.contains { $0.step.destination == d && $0.outcome.didRun && $0.step.item.reclaimableIsUpperBound }
+    }
+
     /// What the preview predicted for the steps that ran, per destination.
     public func predicted(_ d: Destination) -> Int64 {
         steps.filter { $0.step.destination == d && $0.outcome.didRun }.map(\.step.expectedBytes).reduce(0, +)
@@ -281,23 +286,28 @@ public struct CleanupState: Equatable, Sendable {
     public var partlyCleaned: [String: UUID] = [:]
     /// Entries of pickable items that are already in the Trash.
     public var removedPicks: [String: Set<String>] = [:]
+    /// Items whose step was skipped because their list changed: not ticked again until a new scan.
+    public var skipped: Set<String> = []
 
     public init() {}
 
     public init(runs: [RunRecord], after date: Date) {
         for run in runs.sorted(by: { $0.started < $1.started }) where run.started > date {
-            for r in run.steps where r.outcome.didRun { record(r, run: run.id) }
+            for r in run.steps { record(r, run: run.id) }
         }
     }
 
     public mutating func record(_ r: RunRecord.StepResult, run: UUID) {
         let id = r.step.item.id
+        if case .skipped = r.outcome { skipped.insert(id); return }
+        guard r.outcome.didRun else { return }
         if r.step.item.action == .pickToTrash {
             removedPicks[id, default: []].formUnion(r.trashed.map(\.original))
-        } else if r.outcome.isDone {
+        } else if r.outcome.isDone && r.leftAlone.isEmpty {
             cleaned[id] = run
             partlyCleaned[id] = nil
-        } else if r.outcome.isPartial {
+        } else {
+            // Partly done, or done with some targets left alone: what's left stays visible.
             partlyCleaned[id] = run
         }
     }

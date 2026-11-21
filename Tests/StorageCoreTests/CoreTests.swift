@@ -235,6 +235,11 @@ final class RunRecordTests: XCTestCase {
         XCTAssertEqual(state.cleaned.keys.sorted(), ["go/goBuildCache"])
         XCTAssertEqual(state.partlyCleaned.keys.sorted(), ["go/other"], "a partial step isn't marked cleaned")
         XCTAssertEqual(state.removedPicks["downloads/downloads"], ["~/Downloads/Docker.dmg"])
+        XCTAssertEqual(state.skipped, ["docker/dockerBuildCache"], "a skipped step stays unticked until a new scan, across relaunches")
+        var leftSome = run
+        leftSome.steps[index(run, "go/goBuildCache")].leftAlone = ["~/x: replaced or changed since the scan."]
+        XCTAssertEqual(CleanupState(runs: [leftSome], after: .distantPast).partlyCleaned["go/goBuildCache"], run.id,
+                       "done with targets left alone isn't fully cleaned")
         XCTAssertTrue(CleanupState(runs: [run], after: run.started).cleaned.isEmpty, "runs before the snapshot don't count")
         XCTAssertEqual(run.progressText, "2 of 4 steps done, 1 partly done")
     }

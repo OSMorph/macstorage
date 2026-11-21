@@ -146,6 +146,10 @@ struct RunningPhase: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Cleaning up: step \(min(current + 1, plan.steps.count)) of \(plan.steps.count)").font(.title3.weight(.semibold))
             Text("Steps run one at a time. Stopping lets the current step finish with its real outcome.").foregroundStyle(.secondary)
+            if model.journalFailed {
+                Label("The progress record couldn't be saved. If the app quits before the end, this cleanup won't be in History.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(Color.warningText)
+            }
             List(Array(plan.steps.enumerated()), id: \.offset) { i, step in
                 HStack {
                     OutcomeIcon(outcome: outcomes[i], running: i == current && outcomes[i] == nil)
@@ -207,7 +211,8 @@ struct ResultsPhase: View {
             Text("Cleanup finished").font(.title3.weight(.semibold))
             Text(summary).foregroundStyle(.secondary)
             Totals(totals(inTrash))
-            Text("Sizes are measured after each step where the tool allows it; “predicted” marks the rest.").font(.caption).foregroundStyle(.secondary)
+            Text("Sizes are measured after each step where the tool allows it. Predictions cover only the steps that ran; skipped and not-run steps freed nothing.")
+                .font(.caption).foregroundStyle(.secondary)
             if let error = model.unsavedRuns[run.id] {
                 HStack {
                     Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Color.warningText)
@@ -286,15 +291,14 @@ struct ResultsPhase: View {
     /// After the run: what each destination got, measured where possible, next to the prediction.
     private func totals(_ inTrash: [TrashEntry]) -> [(value: String, caption: String, detail: String?)] {
         func detail(_ d: Destination) -> String? {
-            let predicted = run.predicted(d), unmeasured = run.unmeasured(d)
-            guard predicted > 0 else { return nil }
-            return "predicted \(formatBytes(predicted))" + (unmeasured > 0 ? "; \(formatBytes(unmeasured)) of it not re-measured" : "")
+            let predicted = run.predicted(d)
+            return predicted > 0 ? "predicted \(formatBytes(predicted, upperBound: run.predictionIsUpperBound(d))) for the steps that ran" : nil
         }
         let inTrashBytes = inTrash.map(\.bytes).reduce(0, +)
         return [
-            (formatBytes(run.freedOnMac), run.deletedFromTrash > 0 ? "Freed on your Mac, including \(formatBytes(run.deletedFromTrash)) deleted from the Trash" : "Freed on your Mac", detail(.mac)),
+            (freedText(run, .mac), run.deletedFromTrash > 0 ? "Freed on your Mac, including \(formatBytes(run.deletedFromTrash)) deleted from the Trash" : "Freed on your Mac", detail(.mac)),
             (formatBytes(inTrashBytes), "Now in the Trash (\(plural(inTrash.count, "item"))), freed when you empty it", detail(.trash)),
-            (formatBytes(run.freed(.containerDisk)), "Freed inside Docker's disk; the disk file shrinks later", detail(.containerDisk)),
+            (freedText(run, .containerDisk), "Freed inside Docker's disk; the disk file shrinks later", detail(.containerDisk)),
         ]
     }
 
@@ -310,7 +314,12 @@ struct ResultsPhase: View {
                     Toggle(isOn: $includePicked) {
                         VStack(alignment: .leading) {
                             Text("Also delete my \(plural(picked.count, "picked file")) (\(formatBytes(picked.map(\.bytes).reduce(0, +)))). These are your own files, possibly the only copies:").fontWeight(.medium)
-                            ForEach(picked, id: \.landed) { Text("\($0.original) · \(formatBytes($0.bytes))").font(.system(.caption, design: .monospaced)) }
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 1) {
+                                    ForEach(picked, id: \.landed) { Text("\($0.original) · \(formatBytes($0.bytes))").font(.system(.caption, design: .monospaced)) }
+                                }
+                            }
+                            .frame(maxHeight: 90)
                         }
                     }.toggleStyle(.checkbox)
                 }
@@ -359,4 +368,13 @@ struct ResultsPhase: View {
     private func ownerID(_ r: RunRecord.StepResult) -> String {
         model.snapshot?.owners.first { $0.items.contains { $0.id == r.step.item.id } }?.id ?? ""
     }
+}
+
+/// What a run freed in a destination, never showing an unmeasured result as a measured
+/// zero: "Not re-measured" when nothing could be measured, "≥ X" when only part could.
+func freedText(_ run: RunRecord, _ d: Destination) -> String {
+    let measured = d == .mac ? run.freedOnMac : run.freed(d)
+    let unmeasured = run.unmeasured(d)
+    guard unmeasured > 0 else { return formatBytes(measured) }
+    return measured == 0 ? "Not re-measured" : "≥ " + formatBytes(measured)
 }

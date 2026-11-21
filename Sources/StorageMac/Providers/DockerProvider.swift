@@ -101,15 +101,17 @@ public struct DockerProvider: Provider {
         let usage = Dictionary(Parse.dockerSystemDF(df).map { ($0.type, $0) }, uniquingKeysWith: { a, _ in a })
 
         // Top-level images only: intermediate layers can't be removed on their own.
-        let images = Parse.jsonLines(await ctx.output("docker", d + ["images", "--no-trunc", "--format", "{{json .}}"]) ?? "")
-        let containers = Parse.jsonLines(await ctx.output("docker", d + ["ps", "--all", "--no-trunc", "--format", "{{json .}}"]) ?? "")
+        let imageListing = await ctx.output("docker", d + ["images", "--no-trunc", "--format", "{{json .}}"])
+        let containerListing = await ctx.output("docker", d + ["ps", "--all", "--no-trunc", "--format", "{{json .}}"])
+        let images = Parse.jsonLines(imageListing ?? ""), containers = Parse.jsonLines(containerListing ?? "")
         let usedImages = Set(containers.compactMap { $0["Image"] })
         let unusedImages = images.filter { img in
             let ref = "\(img["Repository"] ?? ""):\(img["Tag"] ?? "")"
             return !usedImages.contains(img["ID"] ?? "") && !usedImages.contains(ref) && !usedImages.contains(img["Repository"] ?? "")
         }
         let stopped = containers.filter { ($0["State"] ?? "") != "running" }
-        let volumes = Parse.jsonLines(await ctx.output("docker", d + ["volume", "ls", "--filter", "dangling=true", "--format", "{{json .}}"]) ?? "")
+        let volumeListing = await ctx.output("docker", d + ["volume", "ls", "--filter", "dangling=true", "--format", "{{json .}}"])
+        let volumes = Parse.jsonLines(volumeListing ?? "")
         // The builder named after the context is the engine's own; listing and pruning both use it.
         let cacheListing = await ctx.output("docker", d + ["buildx", "du", "--builder", context, "--verbose"], timeout: .seconds(120))
         let cache = Parse.buildxRecords(cacheListing ?? "").filter(\.reclaimable)
@@ -119,16 +121,24 @@ public struct DockerProvider: Provider {
         // Images share layers, so their listed sizes overlap: cap the estimate at what Docker says is reclaimable.
         let uniqueImageBytes = Dictionary(unusedImages.compactMap { i in i["ID"].map { ($0, Parse.dockerSize(i["Size"] ?? "") ?? 0) } }, uniquingKeysWith: { a, _ in a })
         let imageBytes = min(uniqueImageBytes.values.reduce(0, +), usage["Images"]?.reclaimable ?? 0)
-        var facts = [
-            Fact(.dockerBuildCache, onDisk: size("Build Cache"), reclaimable: .bytes(cache.compactMap(\.bytes).reduce(0, +)),
-                 targets: cache.map { Target($0.id, bytes: $0.bytes) }, root: context, counts: ["records": cache.count]),
-            Fact(.dockerUnusedImages, onDisk: size("Images"), reclaimable: .bytes(imageBytes), targets: imageTargets,
-                 root: context, counts: ["unused": uniqueImageBytes.count, "total": Set(images.compactMap { $0["ID"] }).count]),
-            Fact(.dockerStoppedContainers, onDisk: size("Containers"),
-                 targets: stopped.compactMap { $0["Names"].map { Target($0) } }, root: context, counts: ["stopped": stopped.count, "total": containers.count]),
-            Fact(.dockerUnusedVolumes, onDisk: size("Local Volumes"),
-                 targets: volumes.compactMap { $0["Name"].map { Target($0) } }, root: context, counts: ["unused": volumes.count, "total": usage["Local Volumes"]?.total ?? volumes.count]),
-        ]
+        // A listing that failed leaves its item out (its size stays in the engine's total)
+        // rather than showing an empty list as "nothing to clean".
+        var failed: [String] = []
+        var facts: [Fact] = []
+        if cacheListing != nil {
+            facts.append(Fact(.dockerBuildCache, onDisk: size("Build Cache"), reclaimable: .bytes(cache.compactMap(\.bytes).reduce(0, +)),
+                              targets: cache.map { Target($0.id, bytes: $0.bytes) }, root: context, counts: ["records": cache.count]))
+        } else { failed.append("build cache (docker buildx du)") }
+        if imageListing != nil, containerListing != nil {
+            facts.append(Fact(.dockerUnusedImages, onDisk: size("Images"), reclaimable: .bytes(imageBytes), targets: imageTargets,
+                              root: context, counts: ["unused": uniqueImageBytes.count, "total": Set(images.compactMap { $0["ID"] }).count]))
+            facts.append(Fact(.dockerStoppedContainers, onDisk: size("Containers"),
+                              targets: stopped.compactMap { $0["Names"].map { Target($0) } }, root: context, counts: ["stopped": stopped.count, "total": containers.count]))
+        } else { failed.append("images and containers (docker images, docker ps)") }
+        if volumeListing != nil {
+            facts.append(Fact(.dockerUnusedVolumes, onDisk: size("Local Volumes"),
+                              targets: volumes.compactMap { $0["Name"].map { Target($0) } }, root: context, counts: ["unused": volumes.count, "total": usage["Local Volumes"]?.total ?? volumes.count]))
+        } else { failed.append("volumes (docker volume ls)") }
 
         // Every command is checked against this engine right before it runs.
         for i in facts.indices { facts[i].scopeGuard = .dockerEngine(id: engineID) }
@@ -147,8 +157,9 @@ public struct DockerProvider: Provider {
             if onMac > contents { facts.append(Fact(.dockerDiskSlack, onDisk: .bytes(onMac - contents), path: dataFolder)) }
         }
         var coverage = [CoverageEntry(area: engineName, status: .measured, detail: "Running; measured through the \(context) context.")]
-        if cacheListing == nil {
-            coverage.append(CoverageEntry(area: "\(engineName) build cache", status: .failed, detail: "docker buildx du failed, so build cache records couldn't be listed."))
+        if !failed.isEmpty {
+            coverage.append(CoverageEntry(area: "\(engineName) listings", status: .failed,
+                                          detail: "Couldn't list \(failed.joined(separator: "; ")), so those items aren't shown; their space is still in the engine's total."))
         }
         let owner = Owner(id: "docker:\(context)", name: engineName, kind: .developerTools,
                           location: dataFolder.map(ctx.display) ?? "context \(context)", note: note, hostBytes: hostBytes,

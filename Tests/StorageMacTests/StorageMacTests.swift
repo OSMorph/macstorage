@@ -185,6 +185,16 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: swapped))
     }
 
+    func testATrashedFolderFinderTouchedCanStillBeDeleted() async throws {
+        let folder = home.appending(path: "DerivedData-x")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let result = await executor().perform(step([Target(folder.path, identity: FileSizes.identity(folder.path))]), previewTime: .now)
+        let entry = try XCTUnwrap(result.trashed.first)
+        try await Task.sleep(for: .milliseconds(20))
+        FileManager.default.createFile(atPath: entry.landed + "/.DS_Store", contents: Data([1]))
+        XCTAssertEqual(CleanupExecutor.deleteFromTrash([entry]).deleted.count, 1)
+    }
+
     func testTrashDeletionRefusesAnythingOutsideTheTrash() {
         let path = file("keep.tmp")
         let entry = TrashEntry(original: path, landed: path, identity: FileSizes.identity(path), bytes: 1, picked: false)
@@ -487,6 +497,16 @@ final class HistoryStoreTests: XCTestCase {
         let compact = try XCTUnwrap(store.loadHistory().runs.first)
         XCTAssertEqual(try store.receipt(compact), written)
         XCTAssertTrue(try String(contentsOf: written, encoding: .utf8).contains("/cache/file-299"))
+    }
+
+    func testAJournaledRunThatNeverFinishedIsRecovered() throws {
+        let store = HistoryStore(folder: folder)
+        let run = bigRun()
+        try store.journal(run)
+        XCTAssertTrue(store.loadHistory().runs.isEmpty, "the journal doesn't touch history")
+        XCTAssertEqual(store.recoverJournaledRuns().map(\.id), [run.id])
+        XCTAssertEqual(store.loadHistory().runs.map(\.id), [run.id])
+        XCTAssertTrue(store.recoverJournaledRuns().isEmpty)
     }
 
     func testAStaleReceiptIsWrittenAgainFromTheFullRecord() throws {

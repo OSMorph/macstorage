@@ -118,14 +118,16 @@ struct Inspector: View {
                         details(owner, item)
                     } else {
                         Text(owner.name).font(.title3.weight(.semibold))
-                        Text("\(owner.kind.label) · \(formatBytes(owner.onDisk)) on disk · \(plural(owner.items.count, "item"))").foregroundStyle(.secondary)
+                        HStack(spacing: 4) {
+                            Text("\(owner.kind.label) ·"); MeasureText(measure: owner.onDiskMeasure); Text("on disk · \(plural(owner.items.count, "item"))")
+                        }.foregroundStyle(.secondary)
                         if let note = owner.note { Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
                         Callout("Pick an item in the map or the list to see its recommendation and the exact command or action.")
                         Text(owner.location).font(.caption).foregroundStyle(.secondary)
                     }
                 } else {
                     Text("All owners").font(.title3.weight(.semibold))
-                    Text("\(plural(snapshot.owners.count, "owner")) · \(formatBytes(snapshot.owners.map(\.onDisk).reduce(0, +))) attributed").foregroundStyle(.secondary)
+                    Text("\(plural(snapshot.owners.count, "owner")) · \(formatBytes(snapshot.owners.map(\.hostOnDisk).reduce(0, +))) attributed").foregroundStyle(.secondary)
                     Callout("Pick an owner in the map or the list (Return opens it) to see what it's made of, the recommendation, and the exact command or action.")
                     Callout(snapshot.isPartial
                             ? "\(formatBytes(snapshot.unattributed)) not scanned or attributed yet: this scan stopped before \(snapshot.unfinishedAreas.joined(separator: ", ")) finished, and it doesn't look outside your home folder."

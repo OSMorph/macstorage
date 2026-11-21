@@ -96,6 +96,27 @@ public struct HistoryStore: Sendable {
         }
     }
 
+    /// Saves the in-progress record before a step: the full record only, cheaply. History
+    /// gets it when the run finishes, or from `recoverJournaledRuns` if the app quit first.
+    public func journal(_ run: RunRecord) throws {
+        var record = run
+        for i in record.steps.indices { record.steps[i].step.item.targets = [] }
+        try write(record, to: runURL(run.id))
+    }
+
+    /// Adds runs that were journaled but never finished (the app quit or crashed mid-run)
+    /// to the history, so they appear in History with their interrupted step.
+    @discardableResult
+    public func recoverJournaledRuns() -> [RunRecord] {
+        let folder = folder.appending(path: "Runs")
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        let known = Set(loadHistory().runs.map(\.id))
+        let orphans = files.compactMap { UUID(uuidString: ($0 as NSString).deletingPathExtension) }
+            .filter { !known.contains($0) }.compactMap(fullRun)
+        for run in orphans { try? save(run) }
+        return orphans
+    }
+
     /// The run in full, or nil if only the compact copy survives.
     public func fullRun(_ id: UUID) -> RunRecord? { load(runURL(id)) }
 

@@ -126,7 +126,7 @@ final class AppModel {
         } else {
             let store = store
             Task {
-                let (saved, history) = await offload { (store.loadSnapshot(), store.loadHistory()) }
+                let (saved, history) = await offload { store.recoverJournaledRuns(); return (store.loadSnapshot(), store.loadHistory()) }
                 if let saved { load(saved, history: history) } else { self.history = history }
                 loading = false
             }
@@ -284,7 +284,7 @@ final class AppModel {
             let journal: @Sendable (RunRecord) -> Bool = { record in
                 guard !demo else { return true }
                 do {
-                    try store.save(record, receipt: false)
+                    try store.journal(record)
                     return true
                 } catch {
                     Task { @MainActor in self.journalFailed = true }

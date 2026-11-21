@@ -323,8 +323,10 @@ public struct CleanupExecutor: Sendable {
         let trash = FileSizes.realPath(trashPath) ?? trashPath
         var deleted: [TrashEntry] = [], refused: [String] = []
         for entry in entries {
+            // Same rule as moving: a folder is the same object even if Finder added a .DS_Store.
             guard FileSizes.resolvingAncestors(entry.landed).hasPrefix(trash + "/"),
-                  let identity = FileSizes.identity(entry.landed), identity == entry.identity,
+                  let identity = FileSizes.identity(entry.landed), let expected = entry.identity,
+                  FileSizes.isDirectory(entry.landed) ? identity.isSameObject(as: expected) : identity == expected,
                   (try? FileManager.default.removeItem(atPath: entry.landed)) != nil else {
                 refused.append(entry.original)
                 continue

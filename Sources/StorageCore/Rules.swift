@@ -22,6 +22,8 @@ public struct Fact: Sendable {
     public var targetsComplete = true
     /// For app caches: the app's bundle ID.
     public var appBundleID: String?
+    /// What must still hold when the item's command runs.
+    public var scopeGuard: ScopeGuard?
 
     public init(_ kind: ItemKind, key: String = "", name: String? = nil, onDisk: Measure,
                 sharedBytes: Int64? = nil, reclaimable: Measure? = nil, targets: [Target] = [],
@@ -44,8 +46,9 @@ public struct Fact: Sendable {
 /// Every kind of thing the app knows how to judge. The rule for each lives in `Rules`.
 public enum ItemKind: String, Codable, CaseIterable, Sendable {
     case nixDeadPaths, nixOldGenerations, nixLive
-    case dockerBuildCache, dockerUnusedImages, dockerStoppedContainers, dockerUnusedVolumes, dockerDiskSlack
+    case dockerBuildCache, dockerUnusedImages, dockerStoppedContainers, dockerUnusedVolumes, dockerDiskSlack, dockerVMDisk
     case goModuleCache, goBuildCache
+    case cargoRegistry, rustupToolchains, gradleCaches, mavenRepository
     case npmCache, pnpmStore, voltaToolchains
     case uvCache, pipCache, poetryCache, pyenvVersions
     case homebrewOldVersions
@@ -65,8 +68,10 @@ public enum Rules {
         var action = r.action
         // A folder-clearing command acts on everything in the folder; if the list shown is
         // incomplete, the user can't see the whole scope, so hand it over instead.
-        if case .clearFolder(let command, _, _) = action, !f.targetsComplete {
+        switch action {
+        case .clearFolder(let command, _, _) where !f.targetsComplete, .runAfterRecheck(let command, _) where !f.targetsComplete:
             action = .userRunsCommand(command.display(), needsAdmin: false)
+        default: break
         }
         return Item(id: f.key.isEmpty ? f.kind.rawValue : "\(f.kind.rawValue):\(f.key)", kind: f.kind,
                     name: f.name ?? r.name, onDisk: f.onDisk, sharedBytes: f.sharedBytes,
@@ -74,7 +79,7 @@ public enum Rules {
                     reclaimableIsUpperBound: f.kind == .pnpmStore || f.kind == .dockerUnusedImages, tier: r.tier,
                     explanation: r.why, basis: f.targetsComplete ? r.basis : (r.basis.map { $0 + " " } ?? "") + "The list is incomplete (the scan stopped early or some folders couldn't be read).",
                     action: action, targets: f.targets, targetUnit: r.unit, targetsComplete: f.targetsComplete,
-                    path: f.path, appBundleID: f.appBundleID)
+                    path: f.path, appBundleID: f.appBundleID, scopeGuard: f.scopeGuard)
     }
 
     struct Rule {
@@ -87,7 +92,7 @@ public enum Rules {
     }
 
     static let recheck = "Right before running, the app lists the targets again and skips the step if they differ from the list you approved."
-    static let rootCheck = "The tool clears the whole folder. Right before running, the app checks the folder still resolves to the one you reviewed."
+    static let rootCheck = "The tool clears the whole folder. Right before running, the app checks that the tool still points at the same folder and that nothing appeared in it since you reviewed the list; otherwise it skips the step."
 
     // swiftlint:disable:next function_body_length cyclomatic_complexity
     static func rule(for f: Fact) -> Rule {
@@ -110,11 +115,11 @@ public enum Rules {
             return Rule(name: "Build cache", tier: .safe,
                         why: "\(f.count("records")) cache records, none used by a running build. The next build of each project is slower while it refills.",
                         basis: "Docker removes unused records as a set, so the app binds it two ways: the until filter means nothing created after you reviewed the list can be removed, and right before running the app lists the unused records again and skips the step if they differ from the list you approved. Records in use are never pruned.",
-                        action: .runAfterRecheck(docker(["buildx", "prune", "--builder", root, "-f", "--filter", "until=\(Command.previewTimeToken)"]), .containerDisk), unit: "cache record")
+                        action: .runAfterRecheck(docker(["buildx", "prune", "--builder", root, "--all", "-f", "--filter", "until=\(Command.previewTimeToken)"]), .containerDisk), unit: "cache record")
         case .dockerUnusedImages:
             return Rule(name: "Images no container uses", tier: .probablySafe,
-                        why: "\(f.count("unused")) of \(f.count("total")) images have no container. They download or rebuild when needed. The app removes exactly the approved IDs; Docker refuses any image a container has started using since.",
-                        basis: "Images share layers, so the space freed is at most the figure shown.",
+                        why: "\(f.count("unused")) of \(f.count("total")) images have no container. They download or rebuild when needed. The app removes exactly the approved tags (or IDs for untagged images), Docker refuses any image a container has started using since.",
+                        basis: "Right before running, the app checks that each tag still points at the image you reviewed and that the context still reaches the same engine, and skips the step if not. Images share layers, so the space freed is at most the figure shown.",
                         action: .runOnTargets(docker(["image", "rm"]), .containerDisk), unit: "image")
         case .dockerStoppedContainers:
             return Rule(name: "Stopped containers", tier: .review,
@@ -124,6 +129,24 @@ public enum Rules {
             return Rule(name: "Volumes no container uses", tier: .review,
                         why: "\(f.count("unused")) of \(f.count("total")) volumes aren't attached to a container. Volumes often hold databases, and Docker deletes them immediately, so the app never removes them for you: check the list and run the command yourself.",
                         action: .userRunsCommand(([docker(["volume", "rm"]).display()] + f.targets.map(\.id)).joined(separator: " "), needsAdmin: false), unit: "volume")
+        case .dockerVMDisk:
+            return Rule(name: "VM disk (engine not running)", tier: .leaveAlone,
+                        why: "The engine isn't running, so the app can't see what's inside its disk, and it never starts an engine itself. Start it and scan again to see its images, build cache and volumes.")
+        case .cargoRegistry:
+            return Rule(name: "Cargo registry cache", tier: .safe, why: "Crate sources and archives Cargo downloaded. Cargo downloads them again on the next build that needs them.",
+                        action: .moveToTrash, unit: "folder")
+        case .rustupToolchains:
+            return Rule(name: "Rust toolchains installed by rustup", tier: .probablySafe,
+                        why: "Every toolchain rustup has installed. Old ones can go; rustup installs a toolchain again if a project pins it.",
+                        action: .userActsInApp("Check them with “rustup toolchain list”, then remove old ones with “rustup toolchain uninstall”."))
+        case .gradleCaches:
+            return Rule(name: "Gradle caches", tier: .probablySafe,
+                        why: "Downloaded dependencies and build caches. Gradle downloads or rebuilds them on the next build. Stop running Gradle daemons first (gradle --stop).",
+                        action: .moveToTrash, unit: "folder")
+        case .mavenRepository:
+            return Rule(name: "Maven local repository", tier: .review,
+                        why: "Downloaded dependencies, plus anything installed locally with mvn install, which can't be downloaded again. Only you know which of those you still need.",
+                        action: .userActsInApp("Delete folders of artifacts you no longer build against in Finder"))
         case .dockerDiskSlack:
             return Rule(name: "VM disk space not used by contents", tier: .notRemovable,
                         why: "The VM disk holds more than its contents add up to. The difference is space Docker hasn't handed back to macOS yet; the disk file shrinks when Docker trims it.")
@@ -175,7 +198,7 @@ public enum Rules {
                         action: .runOnTargets(Command("xcrun", ["simctl", "delete"]), .mac), unit: "simulator")
         case .gitBuildOutput:
             return Rule(name: "Build output in inactive, clean checkouts", tier: .probablySafe,
-                        why: "Build output in \(f.count("checkouts")) checkouts with no changes and no activity for 90 days. npm install or the next build recreates it.",
+                        why: "Build output in \(f.count("checkouts")) checkouts with no changes and no activity for 90 days. npm install or the next build recreates it. Right before moving each folder, the app checks its checkout is still clean and idle.",
                         action: .moveToTrash, unit: "folder")
         case .gitUnsavedWork:
             return Rule(name: "Checkouts with uncommitted or unpushed work", tier: .review,
@@ -184,7 +207,7 @@ public enum Rules {
         case .gitRecent:
             return Rule(name: "Clean checkouts in recent use", tier: .leaveAlone, why: "Checkouts you have worked in during the last 90 days.")
         case .appCache:
-            return Rule(name: "Cache", tier: .safe, why: "The app refills its cache as you use it. If the app is running when cleanup starts, this step is skipped so its cache isn't pulled from under it.",
+            return Rule(name: "Cache", tier: .safe, why: "The app refills its cache as you use it. If a running app matches this folder (by bundle ID, name or vendor), the step is skipped so its cache isn't pulled from under it.",
                         action: .moveToTrash, unit: "folder")
         case .appData:
             return Rule(name: "App data", tier: .review, why: "Settings, documents or downloaded content the app keeps. Only the app can clean this safely.",
@@ -194,6 +217,7 @@ public enum Rules {
         case .downloads:
             return Rule(name: "Downloads folder", tier: .review,
                         why: "Files you downloaded. Nothing here rebuilds itself. Pick the files you don't need and they go to the Trash; nothing is removed in bulk.",
+                        basis: "The pick list shows the 50 largest entries not modified for 90 days. Handle anything else in Finder.",
                         action: .pickToTrash, unit: "file")
         case .documents:
             return Rule(name: "Documents", tier: .review, why: "Your files.", action: .userActsInApp("Review them in Finder"))

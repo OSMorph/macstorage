@@ -10,10 +10,11 @@ public struct DockerProvider: Provider {
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
         guard let list = await ctx.output("docker", ["context", "ls", "--format", "{{json .}}"]) else {
-            return ProviderResult(coverage: [CoverageEntry(area: area, status: .skipped, detail: "docker isn't installed.")])
+            return ProviderResult(coverage: [ctx.unavailable("docker", area: area, what: "Docker")])
         }
         var result = ProviderResult()
-        var seenEngines = Set<String>()
+        var seenEngines = Set<String>(), seenDisks = Set<String>()
+        var stopped: [(name: String, endpoint: String)] = []
         for context in Parse.jsonLines(list) {
             guard let name = context["Name"], let endpoint = context["DockerEndpoint"], endpoint.hasPrefix("unix://") else { continue }
             // Two contexts can point at the same engine; count each engine once.
@@ -21,39 +22,82 @@ public struct DockerProvider: Provider {
             guard let info = await ctx.output("docker", ["--context", name, "info", "--format", "{{.ID}}\t{{.OperatingSystem}}"], timeout: .seconds(10))?
                 .trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\t", maxSplits: 1).map(String.init),
                   let engineID = info.first, !engineID.isEmpty else {
-                result.coverage.append(CoverageEntry(area: "Docker context \(name)", status: .skipped, detail: "Engine not running, left alone."))
+                stopped.append((name, endpoint))
                 continue
             }
             guard seenEngines.insert(engineID).inserted else { continue }
-            if let owner = await engine(ctx, context: name, engineName: Self.engineName(info.last ?? "", endpoint: endpoint)) {
-                result.owners.append(owner)
-                result.coverage.append(CoverageEntry(area: owner.name, status: .measured, detail: "Running; measured through the \(name) context."))
+            let engineName = Self.engineName(info.last ?? "", endpoint: endpoint)
+            let disk = Self.vmDisk(engineName, context: name, ctx)
+            if let disk { seenDisks.insert(disk) }
+            let (owner, coverage) = await engine(ctx, context: name, engineID: engineID, engineName: engineName, disk: disk)
+            result.coverage += coverage
+            if let owner { result.owners.append(owner) }
+        }
+        // Engines that aren't running are never started, but their VM disk still takes space.
+        for (name, endpoint) in stopped {
+            let engineName = Self.engineName("", endpoint: endpoint)
+            guard let disk = Self.vmDisk(engineName, context: name, ctx), seenDisks.insert(disk).inserted else {
+                result.coverage.append(CoverageEntry(area: "Docker context \(name)", status: .skipped, detail: "Engine not running, left alone."))
+                continue
             }
+            let onMac = await offload { FileSizes.measure(disk).allocated }
+            let folder = (disk as NSString).deletingLastPathComponent
+            result.owners.append(Owner(id: "docker:\(name)", name: engineName, kind: .developerTools, location: ctx.display(folder),
+                                       note: "Not running. Its VM disk is \(ByteFormat.string(onMac)) on disk; the app never starts an engine to look inside.",
+                                       hostBytes: onMac, items: [Rules.item(Fact(.dockerVMDisk, onDisk: .bytes(onMac), path: folder))]))
+            result.coverage.append(CoverageEntry(area: "\(engineName) (\(name))", status: .notMeasured, detail: "Engine not running: only its VM disk file was measured."))
         }
         return result
+    }
+
+    /// The engine's VM disk file on the Mac, if it can be found (and read without prompting).
+    static func vmDisk(_ engineName: String, context: String, _ ctx: ScanContext) -> String? {
+        var candidates: [String]
+        switch engineName {
+        case "Docker Desktop":
+            candidates = ["~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"]
+        case "OrbStack":
+            candidates = ["~/.orbstack/data/data.img"]
+            let groups = ctx.expand("~/Library/Group Containers")
+            if !ctx.isProtected(groups) {
+                candidates += ((try? FileManager.default.contentsOfDirectory(atPath: groups)) ?? [])
+                    .filter { $0.hasSuffix(".dev.orbstack") }.map { "~/Library/Group Containers/\($0)/data/data.img" }
+            }
+        case "colima":
+            candidates = ["~/.colima/_lima/_disks/\(context)/datadisk", "~/.colima/_lima/\(context)/diffdisk"]
+        default:
+            candidates = []
+        }
+        return candidates.map(ctx.expand).first { !ctx.isProtected($0) && FileManager.default.fileExists(atPath: $0) }
     }
 
     static func engineName(_ operatingSystem: String, endpoint: String) -> String {
         if operatingSystem.localizedCaseInsensitiveContains("OrbStack") { return "OrbStack" }
         if operatingSystem.localizedCaseInsensitiveContains("Docker Desktop") { return "Docker Desktop" }
-        return endpoint.contains(".colima") ? "colima" : operatingSystem.isEmpty ? "Docker engine" : operatingSystem
+        if endpoint.contains(".colima") { return "colima" }
+        if endpoint.contains("orbstack") { return "OrbStack" }
+        if operatingSystem.isEmpty, endpoint.contains("/.docker/run/") { return "Docker Desktop" }
+        return operatingSystem.isEmpty ? "Docker engine" : operatingSystem
     }
 
     /// What `docker image rm` should be given for these unused images: each tag of a tagged
     /// image (removing every tag removes the image) and the ID of an untagged one, once each.
+    /// Each carries the image ID it named at scan time, checked again before removal.
     static func imageRefs(_ images: [[String: String]]) -> [Target] {
         var seen = Set<String>()
         return images.compactMap { img in
-            let repo = img["Repository"] ?? "<none>", tag = img["Tag"] ?? "<none>"
-            let ref = repo == "<none>" || tag == "<none>" ? img["ID"] ?? "" : "\(repo):\(tag)"
-            guard !ref.isEmpty, seen.insert(ref).inserted else { return nil }
-            return Target(ref, bytes: Parse.dockerSize(img["Size"] ?? ""))
+            let repo = img["Repository"] ?? "<none>", tag = img["Tag"] ?? "<none>", id = img["ID"] ?? ""
+            let ref = repo == "<none>" || tag == "<none>" ? id : "\(repo):\(tag)"
+            guard !ref.isEmpty, !id.isEmpty, seen.insert(ref).inserted else { return nil }
+            return Target(ref, bytes: Parse.dockerSize(img["Size"] ?? ""), fingerprint: id)
         }
     }
 
-    private func engine(_ ctx: ScanContext, context: String, engineName: String) async -> Owner? {
+    private func engine(_ ctx: ScanContext, context: String, engineID: String, engineName: String, disk: String?) async -> (Owner?, [CoverageEntry]) {
         let d = ["--context", context]
-        guard let df = await ctx.output("docker", d + ["system", "df", "--format", "{{json .}}"], timeout: .seconds(120)) else { return nil }
+        guard let df = await ctx.output("docker", d + ["system", "df", "--format", "{{json .}}"], timeout: .seconds(120)) else {
+            return (nil, [CoverageEntry(area: engineName, status: .failed, detail: "Running, but docker system df failed through the \(context) context.")])
+        }
         let usage = Dictionary(Parse.dockerSystemDF(df).map { ($0.type, $0) }, uniquingKeysWith: { a, _ in a })
 
         // Top-level images only: intermediate layers can't be removed on their own.
@@ -67,8 +111,8 @@ public struct DockerProvider: Provider {
         let stopped = containers.filter { ($0["State"] ?? "") != "running" }
         let volumes = Parse.jsonLines(await ctx.output("docker", d + ["volume", "ls", "--filter", "dangling=true", "--format", "{{json .}}"]) ?? "")
         // The builder named after the context is the engine's own; listing and pruning both use it.
-        let cache = Parse.buildxRecords(await ctx.output("docker", d + ["buildx", "du", "--builder", context, "--verbose"], timeout: .seconds(120)) ?? "")
-            .filter(\.reclaimable)
+        let cacheListing = await ctx.output("docker", d + ["buildx", "du", "--builder", context, "--verbose"], timeout: .seconds(120))
+        let cache = Parse.buildxRecords(cacheListing ?? "").filter(\.reclaimable)
 
         let size = { (type: String) in usage[type].map { Measure.bytes($0.size) } ?? .bytes(0) }
         let imageTargets = Self.imageRefs(unusedImages)
@@ -86,23 +130,29 @@ public struct DockerProvider: Provider {
                  targets: volumes.compactMap { $0["Name"].map { Target($0) } }, root: context, counts: ["unused": volumes.count, "total": usage["Local Volumes"]?.total ?? volumes.count]),
         ]
 
+        // Every command is checked against this engine right before it runs.
+        for i in facts.indices { facts[i].scopeGuard = .dockerEngine(id: engineID) }
+
         // On the Mac, the engine occupies its VM disk; the items above are sized inside it.
-        let name = engineName
-        let disk: String? = engineName == "Docker Desktop" ? ctx.expand("~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw") : nil
         let dataFolder = disk.map { ($0 as NSString).deletingLastPathComponent }
         for i in facts.indices { facts[i].path = dataFolder }
-        var note: String? = disk == nil ? "Sized inside the engine's VM; the VM disk file on your Mac isn't measured yet." : nil
+        var note = "Sized inside the engine's VM. Its disk file on your Mac wasn't found\(ctx.fullDiskAccess ? "" : " (it may need Full Disk Access)"), so the size shown is what's inside, a lower bound."
         var hostBytes: Int64?
-        if let disk, FileManager.default.fileExists(atPath: disk) {
+        if let disk {
             let onMac = await offload { FileSizes.measure(disk).allocated }
             let logical = ((try? FileManager.default.attributesOfItem(atPath: disk))?[.size] as? NSNumber)?.int64Value ?? 0
             let contents = usage.values.map(\.size).reduce(0, +)
-            note = "One VM disk file, Docker.raw: \(ByteFormat.string(logical)) logical, \(ByteFormat.string(onMac)) on disk. Items are sized inside it."
+            note = "One VM disk file, \((disk as NSString).lastPathComponent): \(ByteFormat.string(logical)) logical, \(ByteFormat.string(onMac)) on disk. Items are sized inside it."
             hostBytes = onMac
             if onMac > contents { facts.append(Fact(.dockerDiskSlack, onDisk: .bytes(onMac - contents), path: dataFolder)) }
         }
-        return Owner(id: "docker:\(context)", name: name, kind: .developerTools,
-                     location: dataFolder.map(ctx.display) ?? "context \(context)", note: note, hostBytes: hostBytes,
-                     items: facts.map(Rules.item))
+        var coverage = [CoverageEntry(area: engineName, status: .measured, detail: "Running; measured through the \(context) context.")]
+        if cacheListing == nil {
+            coverage.append(CoverageEntry(area: "\(engineName) build cache", status: .failed, detail: "docker buildx du failed, so build cache records couldn't be listed."))
+        }
+        let owner = Owner(id: "docker:\(context)", name: engineName, kind: .developerTools,
+                          location: dataFolder.map(ctx.display) ?? "context \(context)", note: note, hostBytes: hostBytes,
+                          items: facts.map(Rules.item))
+        return (owner, coverage)
     }
 }

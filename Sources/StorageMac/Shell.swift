@@ -140,7 +140,10 @@ public struct Shell: ToolRunning {
         func finish() -> (String, String, Bool) {
             for pipe in [out, err] {
                 pipe.fileHandleForReading.readabilityHandler = nil
-                append(pipe.fileHandleForReading.availableDataIfAny, error: pipe === err)
+                // Read at most one byte past the cap: enough to know output was dropped,
+                // however much a surviving child keeps writing.
+                let room = lock.withLock { max(0, Shell.maxOutputBytes - stdout.count - stderr.count) }
+                append(pipe.fileHandleForReading.availableData(upTo: room + 1), error: pipe === err)
                 try? pipe.fileHandleForReading.close()
             }
             return lock.withLock { (String(decoding: stdout, as: UTF8.self), String(decoding: stderr, as: UTF8.self), dropped) }
@@ -162,15 +165,15 @@ public func offload<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T
 }
 
 private extension FileHandle {
-    /// Whatever is left in the pipe without blocking on a writer that never closes it.
-    var availableDataIfAny: Data {
+    /// Up to `limit` bytes left in the pipe, without blocking on a writer that never closes it.
+    func availableData(upTo limit: Int) -> Data {
         var flags = fcntl(fileDescriptor, F_GETFL)
         flags |= O_NONBLOCK
         _ = fcntl(fileDescriptor, F_SETFL, flags)
         var result = Data()
         var buffer = [UInt8](repeating: 0, count: 65_536)
-        while true {
-            let n = Darwin.read(fileDescriptor, &buffer, buffer.count)
+        while result.count < limit {
+            let n = Darwin.read(fileDescriptor, &buffer, min(buffer.count, limit - result.count))
             guard n > 0 else { break }
             result.append(buffer, count: n)
         }
@@ -198,9 +201,13 @@ public struct ToolLocator: Sendable {
         "~/go/bin", "~/.local/bin", "~/Library/pnpm", "/opt/podman/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
     ]
 
-    public init(searchPath: [String], commandLineToolsInstalled: Bool) {
+    /// Values of `passedThrough` variables from the login shell.
+    public let cacheSettings: [String: String]
+
+    public init(searchPath: [String], commandLineToolsInstalled: Bool, cacheSettings: [String: String] = [:]) {
         self.searchPath = searchPath
         self.commandLineToolsInstalled = commandLineToolsInstalled
+        self.cacheSettings = cacheSettings
     }
 
     /// Reads the login shell's PATH and checks for the Command Line Tools.
@@ -210,18 +217,36 @@ public struct ToolLocator: Sendable {
             (p.hasPrefix("~") ? home + p.dropFirst() : p).replacingOccurrences(of: "/$USER/", with: "/\(user)/")
         }
         var dirs: [String] = []
+        var cacheSettings: [String: String] = [:]
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        if let out = try? await Shell.run(URL(fileURLWithPath: shell), ["-ilc", "printf '\\n__PATH__%s\\n' \"$PATH\""],
-                                          environment: ProcessInfo.processInfo.environment, timeout: .seconds(15)),
-           let line = out.stdout.split(separator: "\n").last(where: { $0.hasPrefix("__PATH__") }) {
-            dirs += line.dropFirst("__PATH__".count).split(separator: ":").map(String.init).filter { $0.hasPrefix("/") }
+        // Print PATH and the variables that move tool caches, one marked line each.
+        let script = (["PATH"] + passedThrough).map { "printf '\\n__\($0)__%s\\n' \"$\($0)\"" }.joined(separator: "; ")
+        var env = ProcessInfo.processInfo.environment
+        env["DISABLE_AUTO_UPDATE"] = "true"            // oh-my-zsh: no update check on this shell
+        env["DISABLE_UPDATE_PROMPT"] = "true"
+        if let out = try? await Shell.run(URL(fileURLWithPath: shell), ["-ilc", script], environment: env, timeout: .seconds(15)) {
+            for line in out.stdout.split(separator: "\n") {
+                guard line.hasPrefix("__"), let end = line.dropFirst(2).range(of: "__") else { continue }
+                let name = String(line.dropFirst(2)[..<end.lowerBound]), value = String(line[end.upperBound...])
+                if name == "PATH" {
+                    dirs += value.split(separator: ":").map(String.init).filter { $0.hasPrefix("/") }
+                } else if !value.isEmpty, passedThrough.contains(name) {
+                    cacheSettings[name] = value
+                }
+            }
         }
         dirs += knownLocations.map(expand)
         var seen = Set<String>()
         let unique = dirs.filter { seen.insert($0).inserted }
         let clt = (try? await Shell.run(URL(fileURLWithPath: "/usr/bin/xcode-select"), ["-p"], environment: [:], timeout: .seconds(10)))?.status == 0
-        return ToolLocator(searchPath: unique, commandLineToolsInstalled: clt)
+        return ToolLocator(searchPath: unique, commandLineToolsInstalled: clt, cacheSettings: cacheSettings)
     }
+
+    /// Settings from the login shell that tools need to find the same caches the user's
+    /// Terminal sees.
+    static let passedThrough = ["GOPATH", "GOMODCACHE", "GOCACHE", "npm_config_cache", "UV_CACHE_DIR", "PIP_CACHE_DIR",
+                                "CARGO_HOME", "RUSTUP_HOME", "GRADLE_USER_HOME", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_HOST",
+                                "HOMEBREW_PREFIX", "HOMEBREW_CACHE", "XDG_CACHE_HOME"]
 
     public func url(for tool: String) -> URL? {
         for dir in searchPath {
@@ -233,11 +258,15 @@ public struct ToolLocator: Sendable {
         return nil
     }
 
+    /// What tools run with: the login shell's cache settings, and nothing that makes a
+    /// tool reach the network or do more than asked (Homebrew's autoremove, update checks).
     public var environment: [String: String] {
-        [
+        cacheSettings.merging([
             "PATH": searchPath.joined(separator: ":"), "HOME": NSHomeDirectory(), "USER": NSUserName(),
             "LANG": "en_US.UTF-8", "TERM": "dumb", "NO_COLOR": "1",
-            "HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_ANALYTICS": "1", "HOMEBREW_NO_ENV_HINTS": "1", "DOCKER_CLI_HINTS": "false",
-        ]
+            "HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_AUTOREMOVE": "1", "HOMEBREW_NO_INSTALL_CLEANUP": "1",
+            "HOMEBREW_NO_ANALYTICS": "1", "HOMEBREW_NO_ENV_HINTS": "1", "DOCKER_CLI_HINTS": "false",
+            "NO_UPDATE_NOTIFIER": "1", "npm_config_update_notifier": "false", "npm_config_fund": "false",
+        ]) { _, fixed in fixed }
     }
 }

@@ -8,8 +8,11 @@ public struct NixProvider: Provider {
     public init() {}
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
-        guard ctx.exists("/nix/store"), let dead = await ctx.output("nix-store", ["--gc", "--print-dead"], timeout: .seconds(600)) else {
+        guard ctx.exists("/nix/store") else {
             return ProviderResult(coverage: [CoverageEntry(area: area, status: .skipped, detail: "Nix isn't installed.")])
+        }
+        guard let dead = await ctx.output("nix-store", ["--gc", "--print-dead"], timeout: .seconds(600)) else {
+            return ProviderResult(coverage: [ctx.unavailable("nix-store", area: area, what: "Nix")])
         }
         let paths = Parse.paths(dead)
         var deadBytes: Int64 = 0
@@ -30,7 +33,8 @@ public struct NixProvider: Provider {
     }
 }
 
-/// Language toolchains' caches: Go, npm, pnpm, volta, uv, pip, Poetry, pyenv.
+/// Language toolchains' caches: Go, npm, pnpm, volta, uv, pip, Poetry, pyenv, Cargo,
+/// rustup, Gradle, Maven.
 public struct LanguageCachesProvider: Provider {
     public let area = "Language caches"
 
@@ -40,19 +44,21 @@ public struct LanguageCachesProvider: Provider {
     /// the tool answers: the executor asks it again before clearing.
     private func clearable(_ ctx: ScanContext, _ kind: ItemKind, ask tool: String, _ args: [String]) async -> Fact? {
         guard let reported = await ctx.output(tool, args)?.split(separator: "\n").first.map({ String($0).trimmingCharacters(in: .whitespaces) }),
-              reported.hasPrefix("/"), ctx.exists(reported) else { return nil }
-        let options = ctx.walk()
-        let (targets, size) = await offload { FileSizes.manifest(reported, options) }
+              reported.hasPrefix("/"), let identity = FileSizes.directoryIdentity(reported), !ctx.isProtected(reported) else { return nil }
+        // Listed through the real path, so a symlinked cache folder shows what's really in it.
+        let options = ctx.walk(), real = FileSizes.realPath(reported) ?? reported
+        let (targets, size) = await offload { FileSizes.manifest(real, options) }
         var fact = Fact(kind, onDisk: size.onDisk, sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
                         targets: targets, root: reported)
         fact.targetsComplete = size.isComplete
+        fact.scopeGuard = .folder(identity)
         return fact
     }
 
     /// A folder the app moves to the Trash as a whole, or one only the user handles.
     private func folder(_ ctx: ScanContext, _ kind: ItemKind, _ path: String) async -> Fact? {
         let p = ctx.expand(path), options = ctx.walk()
-        guard ctx.exists(p) else { return nil }
+        guard ctx.exists(p), !ctx.isProtected(p) else { return nil }
         let size = await offload { FileSizes.measure(p, options) }
         return Fact(kind, onDisk: size.onDisk, sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
                     targets: [Target(p, bytes: size.privateBytes, identity: FileSizes.identity(p))], path: p)
@@ -65,17 +71,23 @@ public struct LanguageCachesProvider: Provider {
         async let uv = clearable(ctx, .uvCache, ask: "uv", ["cache", "dir"])
         async let pip = clearable(ctx, .pipCache, ask: "pip3", ["cache", "dir"])
         let pnpmRoot = await ctx.output("pnpm", ["store", "path"])?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let pnpm = pnpmRoot.flatMap { root -> Fact? in
-            guard ctx.exists(root) else { return nil }
-            let s = FileSizes.measure(root, ctx.walk())   // already off the main actor; pnpm stores are small to walk
+        var pnpm: Fact?
+        if let root = pnpmRoot, root.hasPrefix("/"), ctx.exists(root) {
+            let options = ctx.walk()
+            let s = await offload { FileSizes.measure(root, options) }
             // Hard links into node_modules folders bound what a prune can free from above.
-            return Fact(.pnpmStore, onDisk: s.onDisk, reclaimable: s.reclaimable, path: root)
+            pnpm = Fact(.pnpmStore, onDisk: s.onDisk, reclaimable: s.reclaimable, path: root)
         }
 
         let go = [await goMod, await goBuild].compactMap { $0 }
         let node = [await npm, pnpm, await folder(ctx, .voltaToolchains, "~/.volta")].compactMap { $0 }
         let python = [await uv, await pip, await folder(ctx, .poetryCache, "~/Library/Caches/pypoetry"), await folder(ctx, .pyenvVersions, "~/.pyenv/versions")].compactMap { $0 }
-        let owners = [("go", "Go", go), ("node", "Node.js", node), ("python", "Python", python)].compactMap { id, name, facts -> Owner? in
+        let settings = (ctx.tools as? Shell)?.tools.cacheSettings ?? [:]
+        let cargo = settings["CARGO_HOME"] ?? "~/.cargo", rustup = settings["RUSTUP_HOME"] ?? "~/.rustup", gradle = settings["GRADLE_USER_HOME"] ?? "~/.gradle"
+        let rust = [await folder(ctx, .cargoRegistry, cargo + "/registry"), await folder(ctx, .rustupToolchains, rustup + "/toolchains")].compactMap { $0 }
+        let java = [await folder(ctx, .gradleCaches, gradle + "/caches"), await folder(ctx, .mavenRepository, "~/.m2/repository")].compactMap { $0 }
+        let owners = [("go", "Go", go), ("node", "Node.js", node), ("python", "Python", python), ("rust", "Rust", rust), ("jvm", "Java (Gradle, Maven)", java)]
+            .compactMap { id, name, facts -> Owner? in
             facts.isEmpty ? nil : Owner(id: id, name: name, kind: .developerTools,
                                         location: facts.compactMap(\.path).map(ctx.display).joined(separator: ", "), items: facts.map(Rules.item))
         }
@@ -91,11 +103,13 @@ public struct HomebrewProvider: Provider {
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
         guard let dryRun = await ctx.output("brew", ["cleanup", "-n"], timeout: .seconds(300)) else {
-            return ProviderResult(coverage: [CoverageEntry(area: area, status: .skipped, detail: "Homebrew isn't installed.")])
+            return ProviderResult(coverage: [ctx.unavailable("brew", area: area, what: "Homebrew")])
         }
         let cleanup = Parse.brewCleanup(dryRun)
         let bytes = cleanup.total ?? cleanup.targets.compactMap(\.bytes).reduce(0, +)
-        let fact = Fact(.homebrewOldVersions, onDisk: .bytes(bytes), targets: cleanup.targets.map { Target(ctx.display($0.id), bytes: $0.bytes) })
+        var fact = Fact(.homebrewOldVersions, onDisk: .bytes(bytes), targets: cleanup.targets.map { Target(ctx.display($0.id), bytes: $0.bytes) })
+        // A dry run that announces more than removals (pruned links…) isn't a complete list.
+        fact.targetsComplete = cleanup.unrecognized.isEmpty
         return ProviderResult(owners: bytes > 0 ? [Owner(id: "homebrew", name: "Homebrew", kind: .developerTools, location: "/opt/homebrew", items: [Rules.item(fact)])] : [],
                               coverage: [CoverageEntry(area: area, status: .measured, detail: "Dry run of brew cleanup.")])
     }

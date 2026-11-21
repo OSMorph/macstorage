@@ -21,48 +21,54 @@ public struct GitProvider: Provider {
         var lastActivity: Date
         var hasUnsavedWork: Bool
         var size: FolderSize
-        var buildOutput: [Target]
+        var buildOutput: [(target: Target, size: FolderSize)]
     }
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
         guard ctx.tools.isInstalled("git") else {
             return ProviderResult(coverage: [CoverageEntry(area: area, status: .skipped, detail: "git isn't available (Command Line Tools missing).")])
         }
-        var checkouts: [Checkout] = []
-        let found = find(ctx)
         let deadline = ContinuousClock.now + Self.budget
+        let (found, searchFinished) = await offload { self.find(ctx, until: deadline) }
+        var checkouts: [Checkout] = []
         for (path, isWorktree) in found {
-            if Task.isCancelled || ContinuousClock.now > deadline { break }
+            if Task.isCancelled || ctx.stop.isStopped || ContinuousClock.now > deadline { break }
             checkouts.append(await inspect(ctx, path, isWorktree: isWorktree))
         }
-        let partial = checkouts.count < found.count
+        let partial = checkouts.count < found.count || !searchFinished
         let inactive = Date().addingTimeInterval(-Self.inactiveAfter)
         let unsaved = checkouts.filter(\.hasUnsavedWork)
         let idle = checkouts.filter { !$0.hasUnsavedWork && $0.lastActivity < inactive }
         let build = idle.flatMap(\.buildOutput)
-        let total = checkouts.map(\.size.privateBytes).reduce(0, +)
-        let unsavedBytes = unsaved.map(\.size.privateBytes).reduce(0, +)
-        let buildBytes = build.compactMap(\.bytes).reduce(0, +)
+        // On disk is allocated; what removing frees is private (clones of other checkouts aren't freed).
+        let total = FolderSize.total(checkouts.map(\.size)), unsavedSize = FolderSize.total(unsaved.map(\.size))
+        let buildSize = FolderSize.total(build.map(\.size))
+        let rest = total.allocated - unsavedSize.allocated - buildSize.allocated
+        var buildFact = Fact(.gitBuildOutput, onDisk: buildSize.onDisk, reclaimable: buildSize.reclaimable, targets: build.map(\.target),
+                             counts: ["checkouts": idle.filter { !$0.buildOutput.isEmpty }.count])
+        buildFact.targetsComplete = buildSize.isComplete
         let facts = [
-            Fact(.gitBuildOutput, onDisk: .bytes(buildBytes), targets: build, counts: ["checkouts": idle.filter { !$0.buildOutput.isEmpty }.count]),
-            Fact(.gitUnsavedWork, onDisk: .bytes(unsavedBytes), targets: unsaved.map { Target($0.path, bytes: $0.size.privateBytes) }, counts: ["checkouts": unsaved.count]),
-            Fact(.gitRecent, onDisk: .bytes(max(0, total - unsavedBytes - buildBytes))),
+            buildFact,
+            Fact(.gitUnsavedWork, onDisk: unsavedSize.onDisk, targets: unsaved.map { Target($0.path, bytes: $0.size.allocated) }, counts: ["checkouts": unsaved.count]),
+            Fact(.gitRecent, onDisk: total.isComplete ? .bytes(max(0, rest)) : .atLeast(max(0, rest))),
         ]
-        let allocated = checkouts.map(\.size.allocated).reduce(0, +)
         let worktrees = checkouts.filter(\.isWorktree).count
         let owner = Owner(id: "git", name: "Git checkouts", kind: .developerTools, location: "\(plural(checkouts.count, "checkout")) in your home folder",
-                          note: "\(plural(checkouts.count - worktrees, "repo")) and \(plural(worktrees, "worktree")). \(ByteFormat.string(allocated)) if shared blocks were counted per copy.",
+                          note: "\(plural(checkouts.count - worktrees, "repo")) and \(plural(worktrees, "worktree")). \(ByteFormat.string(total.shared)) of their space is shared between clones.",
                           items: facts.map(Rules.item))
-        let detail = partial ? "\(plural(found.count, "checkout")) found; \(checkouts.count) measured before the time limit." : "\(plural(checkouts.count, "checkout")) found."
+        let detail = partial ? "\(plural(found.count, "checkout")) found\(searchFinished ? "" : " before the search time limit"); \(checkouts.count) measured."
+            : "\(plural(checkouts.count, "checkout")) found."
         return ProviderResult(owners: checkouts.isEmpty ? [] : [owner], coverage: [CoverageEntry(area: area, status: .measured, detail: detail)])
     }
 
-    /// Finds checkouts (a `.git` folder) and worktrees (a `.git` file) up to seven levels deep.
-    func find(_ ctx: ScanContext) -> [(String, Bool)] {
-        guard let walker = FileManager.default.enumerator(at: URL(fileURLWithPath: ctx.home), includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
+    /// Finds checkouts (a `.git` folder) and worktrees and submodules (a `.git` file) up to
+    /// seven levels deep. Each is measured without the checkouts nested in it.
+    func find(_ ctx: ScanContext, until deadline: ContinuousClock.Instant) -> (found: [(String, Bool)], finished: Bool) {
+        guard let walker = FileManager.default.enumerator(at: URL(fileURLWithPath: ctx.home), includingPropertiesForKeys: [.isDirectoryKey]) else { return ([], true) }
         let protected = ctx.protectedPaths
         var found: [(String, Bool)] = []
         while let url = walker.nextObject() as? URL {
+            if ctx.stop.isStopped || ContinuousClock.now > deadline { return (found, false) }
             let name = url.lastPathComponent
             if Self.skip.contains(name) || walker.level > 7 || protected.contains(url.path) {
                 walker.skipDescendants(); continue
@@ -72,7 +78,7 @@ public struct GitProvider: Provider {
             found.append((url.deletingLastPathComponent().path, !isDir))
             if isDir { walker.skipDescendants() }
         }
-        return found
+        return (found, true)
     }
 
     /// When the checkout was last used: its index and HEAD change on every commit, checkout
@@ -89,19 +95,44 @@ public struct GitProvider: Provider {
         }.max() ?? .distantPast
     }
 
-    func inspect(_ ctx: ScanContext, _ path: String, isWorktree: Bool) async -> Checkout {
-        // "## main...origin/main [ahead 2]" plus one line per changed file.
-        let status = await ctx.output("git", ["-C", path, "status", "--porcelain=v1", "--branch"], timeout: .seconds(20)) ?? ""
+    /// From `git status --porcelain=v1 --branch`: changed files, unpushed commits or no upstream.
+    static func hasUnsavedWork(_ status: String) -> Bool {
         let lines = status.split(separator: "\n")
         let head = lines.first.map(String.init) ?? ""
-        let unsaved = lines.count > 1 || head.contains("ahead") || !head.contains("...")
+        return lines.count > 1 || head.contains("ahead") || !head.contains("...")
+    }
+
+    /// Why build output in `checkout` may no longer be removed, or nil if it still may:
+    /// checked again right before each move.
+    public static func ineligibility(_ tools: any ToolRunning, checkout: String) async -> String? {
+        guard let out = try? await tools.run("git", ["-C", checkout, "status", "--porcelain=v1", "--branch"], timeout: .seconds(20)),
+              out.succeeded else { return "its checkout's status couldn't be read." }
+        if hasUnsavedWork(out.stdout) { return "its checkout now has uncommitted or unpushed work." }
+        let isWorktree = !FileSizes.isDirectory(checkout + "/.git")
+        if lastActivity(checkout, isWorktree: isWorktree) > Date().addingTimeInterval(-inactiveAfter) { return "its checkout was used in the last 90 days." }
+        return nil
+    }
+
+    func inspect(_ ctx: ScanContext, _ path: String, isWorktree: Bool) async -> Checkout {
+        let status = await ctx.output("git", ["-C", path, "status", "--porcelain=v1", "--branch"], timeout: .seconds(20))
         let modified = Self.lastActivity(path, isWorktree: isWorktree)
-        let short = ctx.walk(limit: .seconds(20)), long = ctx.walk(limit: .seconds(30))
+        // Build output only counts when git ignores it: a committed dist/ is source.
+        var ignored: [String] = []
+        for name in Self.buildOutputNames where FileManager.default.fileExists(atPath: path + "/" + name) {
+            if let out = try? await ctx.tools.run("git", ["-C", path, "check-ignore", "-q", name], timeout: .seconds(10)), out.status == 0 {
+                ignored.append(path + "/" + name)
+            }
+        }
+        let short = ctx.walk(limit: .seconds(20)), long = ctx.walk(limit: .seconds(30), skipGitCheckouts: true)
         let (build, size) = await offload {
-            (Self.buildOutputNames.map { path + "/" + $0 }.filter { FileManager.default.fileExists(atPath: $0) }
-                .map { Target($0, bytes: FileSizes.measure($0, short).privateBytes, identity: FileSizes.identity($0)) },
+            (ignored.map { p in
+                let size = FileSizes.measure(p, short)
+                return (target: Target(p, bytes: size.privateBytes, identity: FileSizes.identity(p)), size: size)
+            },
              FileSizes.measure(path, long))
         }
-        return Checkout(path: path, isWorktree: isWorktree, lastActivity: modified, hasUnsavedWork: unsaved, size: size, buildOutput: build)
+        return Checkout(path: path, isWorktree: isWorktree, lastActivity: modified,
+                        hasUnsavedWork: status.map(Self.hasUnsavedWork) ?? true,   // unreadable status: treat as unsaved
+                        size: size, buildOutput: build)
     }
 }

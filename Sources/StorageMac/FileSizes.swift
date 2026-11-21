@@ -21,6 +21,17 @@ public struct FolderSize: Sendable, Equatable {
     public var onDisk: Measure { isComplete ? .bytes(allocated) : .atLeast(allocated) }
     /// The private size, marked as a lower bound when the walk was incomplete.
     public var reclaimable: Measure { isComplete ? .bytes(privateBytes) : .atLeast(privateBytes) }
+
+    /// Several sizes added up; incomplete if any part is.
+    public static func total(_ parts: [FolderSize]) -> FolderSize {
+        parts.reduce(into: FolderSize()) { t, p in
+            t.allocated += p.allocated
+            t.privateBytes += p.privateBytes
+            t.files += p.files
+            t.unreadable += p.unreadable
+            t.finished = t.finished && p.finished
+        }
+    }
 }
 
 /// Options for a walk.
@@ -30,11 +41,14 @@ public struct WalkOptions: Sendable {
     /// Don't enter folders that are git checkouts (they belong to the Git owner).
     public var skipGitCheckouts = false
     public var limit: Duration = .seconds(120)
+    /// Stops the walk early (walks run on dispatch queues, where task cancellation can't reach).
+    public var stop: StopSignal?
 
-    public init(excluding: Set<String> = [], skipGitCheckouts: Bool = false, limit: Duration = .seconds(120)) {
+    public init(excluding: Set<String> = [], skipGitCheckouts: Bool = false, limit: Duration = .seconds(120), stop: StopSignal? = nil) {
         self.excluding = excluding
         self.skipGitCheckouts = skipGitCheckouts
         self.limit = limit
+        self.stop = stop
     }
 }
 
@@ -67,6 +81,20 @@ public enum FileSizes {
         guard lstat(path, &st) == 0 else { return nil }
         return FileIdentity(device: Int64(st.st_dev), inode: UInt64(st.st_ino),
                             modified: Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)
+    }
+
+    /// The identity of the directory `path` resolves to, or nil if it isn't a directory.
+    /// Directories are compared by `isSameObject`: their modification time changes
+    /// whenever an entry is added.
+    public static func directoryIdentity(_ path: String) -> FileIdentity? {
+        guard let real = realPath(path), isDirectory(real) else { return nil }
+        return identity(real)
+    }
+
+    /// True for a real directory (a symlink to one is not).
+    public static func isDirectory(_ path: String) -> Bool {
+        var st = stat()
+        return lstat(path, &st) == 0 && st.st_mode & S_IFMT == S_IFDIR
     }
 
     /// `path` with every symlink in its *parent* folders resolved; the last component is
@@ -148,7 +176,7 @@ public enum FileSizes {
             return
         }
         while let url = walker.nextObject() as? URL {
-            if Task.isCancelled || ContinuousClock.now > deadline { size.finished = false; break }
+            if Task.isCancelled || options.stop?.isStopped == true || ContinuousClock.now > deadline { size.finished = false; break }
             let p = url.path
             guard lstat(p, &st) == 0 else { unreadable += 1; continue }
             switch st.st_mode & S_IFMT {

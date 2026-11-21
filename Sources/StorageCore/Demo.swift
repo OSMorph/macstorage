@@ -22,6 +22,7 @@ public enum Demo {
                    hostBytes: Int64? = nil, _ facts: [Fact]) -> Owner {
             Owner(id: id, name: name, kind: kind, location: location, note: note, isOwnVolume: ownVolume, hostBytes: hostBytes, items: facts.map(Rules.item))
         }
+        let dockerData = "~/Library/Containers/com.docker.docker/Data/vms/0/data"
         let pkgs = ["openssl", "python3", "nodejs", "go", "llvm", "git", "curl", "sqlite", "zlib", "cmake", "rustc", "ffmpeg"]
         let owners = [
             owner("downloads", "Downloads", .personalFiles, "~/Downloads", [
@@ -38,11 +39,11 @@ public enum Demo {
             ]),
             owner("docker", "Docker Desktop", .developerTools, "~/Library/Containers/com.docker.docker", note: "One VM disk file, Docker.raw: 64 GB logical, 50.1 GB on disk.",
                   hostBytes: gb(50.1), [
-                Fact(.dockerBuildCache, onDisk: .bytes(gb(24.3)), reclaimable: .bytes(gb(21.5)), targets: list(737, { "cache record \(hex($0 + 1000, 12))" }, bytes: gb(21.5)), root: "desktop-linux", counts: ["records": 737]),
-                Fact(.dockerUnusedImages, onDisk: .bytes(gb(8.3)), reclaimable: .bytes(gb(7.5)), targets: list(23, { "image-\($0):old \(hex($0 + 2000, 12))" }, bytes: gb(7.5)), root: "desktop-linux", counts: ["unused": 23, "total": 44]),
-                Fact(.dockerStoppedContainers, onDisk: .bytes(110_000_000), targets: list(31, { "api-\($0 + 1)" }, bytes: 40_000_000), root: "desktop-linux", counts: ["stopped": 31, "total": 58]),
-                Fact(.dockerUnusedVolumes, onDisk: .bytes(gb(3)), targets: list(20, { "pgdata-\(hex($0 + 3000, 6))" }, bytes: gb(2.1)), root: "desktop-linux", counts: ["unused": 20, "total": 25]),
-                Fact(.dockerDiskSlack, onDisk: .bytes(gb(14.4))),
+                Fact(.dockerBuildCache, onDisk: .bytes(gb(24.3)), reclaimable: .bytes(gb(21.5)), targets: list(737, { "cache record \(hex($0 + 1000, 12))" }, bytes: gb(21.5)), root: "desktop-linux", path: dockerData, counts: ["records": 737]),
+                Fact(.dockerUnusedImages, onDisk: .bytes(gb(8.3)), reclaimable: .bytes(gb(7.5)), targets: list(23, { "image-\($0):old \(hex($0 + 2000, 12))" }, bytes: gb(7.5)), root: "desktop-linux", path: dockerData, counts: ["unused": 23, "total": 44]),
+                Fact(.dockerStoppedContainers, onDisk: .bytes(110_000_000), targets: list(31, { "api-\($0 + 1)" }, bytes: 40_000_000), root: "desktop-linux", path: dockerData, counts: ["stopped": 31, "total": 58]),
+                Fact(.dockerUnusedVolumes, onDisk: .bytes(gb(3)), targets: list(20, { "pgdata-\(hex($0 + 3000, 6))" }, bytes: gb(2.1)), root: "desktop-linux", path: dockerData, counts: ["unused": 20, "total": 25]),
+                Fact(.dockerDiskSlack, onDisk: .bytes(gb(14.4)), path: dockerData),
             ]),
             owner("slack", "Slack", .apps, "~/Library/Containers/com.tinyspeck.slackmacgap", [
                 Fact(.appCache, key: "slack", onDisk: .bytes(gb(3.2)), targets: [Target("~/Library/Containers/com.tinyspeck.slackmacgap/Data/Library/Caches", bytes: gb(3.2))]),
@@ -82,7 +83,6 @@ public enum Demo {
         let coverage = [
             CoverageEntry(area: "Full Disk Access", status: .measured, detail: "Granted."),
             CoverageEntry(area: "Docker Desktop", status: .measured, detail: "Running. Two Docker contexts point to the same engine, so it was counted once.", seconds: 4),
-            CoverageEntry(area: "podman", status: .skipped, detail: "Installed, but no podman machine exists."),
             CoverageEntry(area: "Nix", status: .measured, detail: "Dead paths sized; old generations not measured yet (takes about 30 s).", seconds: 16),
             CoverageEntry(area: "Xcode", status: .skipped, detail: "Not installed (Command Line Tools only)."),
             CoverageEntry(area: "Home folder and Library", status: .measured, detail: "All folders measured.", seconds: 187),
@@ -90,10 +90,16 @@ public enum Demo {
         ]
         return Snapshot(date: scanDate, scanDuration: 386, disk: disk, owners: owners, coverage: coverage, folders: [
             "~": [
+                FolderEntry(name: "Library", bytes: gb(96), kind: .developerTools, owners: [OwnerShare(ownerID: "docker", bytes: gb(50.1)), OwnerShare(ownerID: "slack", bytes: gb(8.3))], hasChildren: true),
                 FolderEntry(name: "Downloads", bytes: gb(64), kind: .personalFiles, owners: [OwnerShare(ownerID: "downloads", bytes: gb(64))]),
-                FolderEntry(name: "Library", bytes: gb(96), kind: .apps, owners: [OwnerShare(ownerID: "docker", bytes: gb(50.1)), OwnerShare(ownerID: "slack", bytes: gb(8.3))], hasChildren: true),
                 FolderEntry(name: "Developer", bytes: gb(10.7), kind: .developerTools, owners: [OwnerShare(ownerID: "git", bytes: gb(10.7))]),
                 FolderEntry(name: "go", bytes: gb(10.5), kind: .developerTools, owners: [OwnerShare(ownerID: "go", bytes: gb(10.5))]),
+            ],
+            "~/Library": [
+                FolderEntry(name: "Containers", bytes: gb(52), kind: .developerTools, owners: [OwnerShare(ownerID: "docker", bytes: gb(50.1))]),
+                FolderEntry(name: "Caches", bytes: gb(21), kind: .apps, owners: [OwnerShare(ownerID: "go", bytes: gb(3)), OwnerShare(ownerID: "slack", bytes: gb(2.1))]),
+                FolderEntry(name: "Application Support", bytes: gb(17), kind: .apps, owners: [OwnerShare(ownerID: "slack", bytes: gb(6.2))]),
+                FolderEntry(name: "Logs", bytes: 840_000_000, kind: .system, owners: [OwnerShare(ownerID: "logs", bytes: 840_000_000)]),
             ],
         ])
     }

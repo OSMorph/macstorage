@@ -67,6 +67,13 @@ final class FileSizesTests: XCTestCase {
     }
 }
 
+final class Journal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [RunRecord] = []
+    func add(_ r: RunRecord) { lock.withLock { stored.append(r) } }
+    var records: [RunRecord] { lock.withLock { stored } }
+}
+
 final class CleanupSafetyTests: XCTestCase {
     var home: URL!
 
@@ -94,8 +101,51 @@ final class CleanupSafetyTests: XCTestCase {
 
     func testNothingOutsideTheHomeFolderIsMoved() async {
         let result = await executor().perform(step([Target("/etc/hosts"), Target(home.path + "/../../etc/hosts")]), previewTime: .now)
-        XCTAssertEqual(result.outcome, .failed(error: "/etc/hosts is outside your home folder. \(home.path)/../../etc/hosts is outside your home folder."))
+        XCTAssertEqual(result.outcome, .skipped(reason: "Nothing on the approved list was still as you reviewed it."))
+        XCTAssertEqual(result.leftAlone, ["/etc/hosts: outside your home folder.", "\(home.path)/../../etc/hosts: outside your home folder."])
         XCTAssertTrue(FileManager.default.fileExists(atPath: "/etc/hosts"))
+    }
+
+    func testAChangedTargetIsLeftAloneWithoutStoppingTheStep() async throws {
+        let kept = file("kept.log"), changed = file("changed.log")
+        let scanned = try XCTUnwrap(FileSizes.identity(changed))
+        FileManager.default.createFile(atPath: changed, contents: Data(repeating: 3, count: 9_000))   // rewritten since the scan
+        let result = await executor().perform(step([Target(kept, identity: FileSizes.identity(kept)), Target(changed, identity: scanned)]), previewTime: .now)
+        defer { result.trashed.forEach { try? FileManager.default.removeItem(atPath: $0.landed) } }
+        XCTAssertTrue(result.outcome.isDone)
+        XCTAssertFalse(result.outcome.stopsRun)
+        XCTAssertEqual(result.trashed.map(\.original), [kept])
+        XCTAssertEqual(result.leftAlone, ["\(changed): replaced or changed since the scan."])
+    }
+
+    func testAFolderThatGainedAnEntryIsStillTheSameFolder() async throws {
+        let folder = home.appending(path: "DiagnosticReports")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let scanned = try XCTUnwrap(FileSizes.identity(folder.path))
+        try await Task.sleep(for: .milliseconds(20))
+        FileManager.default.createFile(atPath: folder.appending(path: "new.crash").path, contents: Data([1]))
+        let result = await executor().perform(step([Target(folder.path, identity: scanned)]), previewTime: .now)
+        defer { result.trashed.forEach { try? FileManager.default.removeItem(atPath: $0.landed) } }
+        XCTAssertEqual(result.trashed.count, 1)
+    }
+
+    func testATargetWithoutAScanIdentityIsNotMoved() async {
+        let path = file("unknown.bin")
+        let result = await executor().perform(step([Target(path)]), previewTime: .now)
+        XCTAssertTrue(result.trashed.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+    }
+
+    func testBuildOutputIsLeftAloneWhenItsCheckoutHasNewWork() async throws {
+        let checkout = home.appending(path: "repo")
+        try FileManager.default.createDirectory(at: checkout.appending(path: ".git"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: checkout.appending(path: "node_modules"), withIntermediateDirectories: true)
+        let out = checkout.appending(path: "node_modules").path
+        let tools = FakeTools([{ $0.contains("status") ? ToolOutput(status: 0, stdout: "## main...origin/main\n M index.js\n") : nil }])
+        let result = await executor(tools).perform(step([Target(out, identity: FileSizes.identity(out))], kind: .gitBuildOutput), previewTime: .now)
+        XCTAssertTrue(result.trashed.isEmpty)
+        XCTAssertEqual(result.leftAlone, ["\(out): its checkout now has uncommitted or unpushed work."])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: out))
     }
 
     func testASymlinkedParentFolderCantLeadOutside() async throws {
@@ -148,7 +198,140 @@ final class CleanupSafetyTests: XCTestCase {
         let result = await executor(tools).perform(step(targets, action: .runOnTargets(Command("nix-store", ["--delete"]), .mac), kind: .nixDeadPaths), previewTime: .now)
         guard case .partial(_, let problems) = result.outcome else { return XCTFail("\(result.outcome)") }
         XCTAssertEqual(problems, ["Batch 2 of 2: error: path is alive"])
-        XCTAssertEqual(result.executed.count, 1)
+        XCTAssertEqual(result.executed.count, 2, "the failed invocation is recorded too")
+        XCTAssertTrue(result.executed[1].hasSuffix("[failed: error: path is alive]"))
+    }
+
+    func testAFailedFirstInvocationIsStillRecordedAsRun() async {
+        let tools = FakeTools([{ $0.hasPrefix("nix-store") ? ToolOutput(status: 1, stdout: "", stderr: "error: cannot delete path 'b' since it is still alive") : nil }])
+        let result = await executor(tools).perform(step([Target("a"), Target("b")], action: .runOnTargets(Command("nix-store", ["--delete"]), .mac), kind: .nixDeadPaths), previewTime: .now)
+        guard case .failed(let error) = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertTrue(error.contains("may have removed some targets"))
+        XCTAssertEqual(result.executed, ["nix-store --delete a b   [failed: error: cannot delete path 'b' since it is still alive]"])
+    }
+
+    func testTheRunIsJournaledBeforeEachStep() async {
+        let journal = Journal()
+        var plan = CleanupPlan(snapshot: Demo.snapshot(), selected: [], picks: [:])
+        plan.steps = [step([Target("x")], action: .runOnTargets(Command("nix-store", ["--delete"]), .mac), kind: .nixDeadPaths)]
+        _ = await executor().run(plan, stop: StopSignal(), journal: { journal.add($0) })
+        XCTAssertEqual(journal.records.first?.steps.first?.outcome, .failed(error: CleanupExecutor.interrupted))
+    }
+
+    // MARK: Docker binding
+
+    func dockerImagesStep(_ targets: [Target]) -> CleanupStep {
+        var s = step(targets, action: .runOnTargets(Command("docker", ["--context", "c", "image", "rm"]), .containerDisk), kind: .dockerUnusedImages)
+        s.item.scopeGuard = .dockerEngine(id: "ENGINE1")
+        return s
+    }
+
+    func dockerTools(engine: String, images: String) -> FakeTools {
+        FakeTools([
+            { $0.contains(" info ") ? ToolOutput(status: 0, stdout: engine + "\n") : nil },
+            { $0.contains("image inspect") ? ToolOutput(status: 0, stdout: images) : nil },
+        ])
+    }
+
+    func testARetaggedImageIsNotRemoved() async {
+        let tools = dockerTools(engine: "ENGINE1", images: "sha256:new\n")
+        let result = await executor(tools).perform(dockerImagesStep([Target("app:latest", fingerprint: "sha256:old")]), previewTime: .now)
+        guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertFalse(tools.calls.contains { $0.contains("image rm") })
+    }
+
+    func testAContextPointingAtAnotherEngineIsRefused() async {
+        let tools = dockerTools(engine: "ENGINE2", images: "sha256:old\n")
+        let result = await executor(tools).perform(dockerImagesStep([Target("app:latest", fingerprint: "sha256:old")]), previewTime: .now)
+        guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertFalse(tools.calls.contains { $0.contains("image rm") })
+    }
+
+    func testUnchangedImagesAreRemovedByTheApprovedRefs() async {
+        let tools = dockerTools(engine: "ENGINE1", images: "sha256:a\nsha256:b\n")
+        let result = await executor(tools).perform(dockerImagesStep([Target("app:1", fingerprint: "sha256:a"), Target("app:2", fingerprint: "sha256:b")]), previewTime: .now)
+        XCTAssertTrue(result.outcome.isDone)
+        XCTAssertTrue(tools.calls.contains("docker --context c image rm app:1 app:2"))
+    }
+
+    func testImageRefsCarryTheirImageID() {
+        let refs = DockerProvider.imageRefs([["Repository": "app", "Tag": "1", "ID": "sha256:a", "Size": "1GB"],
+                                             ["Repository": "<none>", "Tag": "<none>", "ID": "sha256:b", "Size": "2GB"]])
+        XCTAssertEqual(refs.map(\.id), ["app:1", "sha256:b"])
+        XCTAssertEqual(refs.map(\.fingerprint), ["sha256:a", "sha256:b"])
+    }
+
+    // MARK: Folder binding
+
+    func cacheStep(_ folder: URL) throws -> CleanupStep {
+        let (targets, _) = FileSizes.manifest(FileSizes.realPath(folder.path)!)
+        var s = step(targets, action: .clearFolder(Command("go", ["clean", "-cache"]), root: folder.path, .mac), kind: .goBuildCache)
+        s.item.scopeGuard = .folder(try XCTUnwrap(FileSizes.directoryIdentity(folder.path)))
+        return s
+    }
+
+    func cacheFolder() throws -> URL {
+        let folder = home.appending(path: "go-build")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: folder.appending(path: "a").path, contents: Data(repeating: 1, count: 8_000))
+        return folder
+    }
+
+    func goTools(_ folder: URL, clearing: Bool = false) -> FakeTools {
+        FakeTools([
+            { $0 == "go env GOCACHE" ? ToolOutput(status: 0, stdout: folder.path + "\n") : nil },
+            { line in
+                guard line == "go clean -cache" else { return nil }
+                if clearing { try? FileManager.default.removeItem(at: folder) }
+                return ToolOutput(status: 0, stdout: "")
+            },
+        ])
+    }
+
+    func testAFileAddedAfterThePreviewSkipsTheClear() async throws {
+        let folder = try cacheFolder()
+        let s = try cacheStep(folder)
+        FileManager.default.createFile(atPath: folder.appending(path: "unreviewed").path, contents: Data([1]))
+        let tools = goTools(folder)
+        let result = await executor(tools).perform(s, previewTime: .now)
+        guard case .skipped(let why) = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertTrue(why.contains("1 file appeared"))
+        XCTAssertFalse(tools.calls.contains("go clean -cache"))
+    }
+
+    func testAReplacedFolderSkipsTheClear() async throws {
+        let folder = try cacheFolder()
+        let s = try cacheStep(folder)
+        try FileManager.default.removeItem(at: folder)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let tools = goTools(folder)
+        let result = await executor(tools).perform(s, previewTime: .now)
+        XCTAssertEqual(result.outcome, .skipped(reason: "The folder was replaced since the scan."))
+        XCTAssertFalse(tools.calls.contains("go clean -cache"))
+    }
+
+    func testAnUnchangedFolderIsClearedAndMeasured() async throws {
+        let folder = try cacheFolder()
+        let s = try cacheStep(folder)
+        let result = await executor(goTools(folder, clearing: true)).perform(s, previewTime: .now)
+        guard case .done(let measured?) = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertGreaterThan(measured, 0)
+    }
+
+    // MARK: Measurement
+
+    func testSimulatorsAreMeasuredByTheirFolders() async throws {
+        let devices = home.appending(path: "Devices")
+        try FileManager.default.createDirectory(at: devices.appending(path: "UDID-1"), withIntermediateDirectories: true)
+        var s = step([Target("UDID-1", bytes: 5_000)], action: .runOnTargets(Command("xcrun", ["simctl", "delete"]), .mac), kind: .simulatorsUnavailable)
+        s.item.path = devices.path
+        let tools = FakeTools([{ line in
+            guard line == "xcrun simctl delete UDID-1" else { return nil }
+            try? FileManager.default.removeItem(at: devices.appending(path: "UDID-1"))
+            return ToolOutput(status: 0, stdout: "")
+        }])
+        let result = await executor(tools).perform(s, previewTime: .now)
+        XCTAssertEqual(result.outcome, .done(measured: 5_000))
     }
 
     func testAFailureStopsTheRest() async {
@@ -170,5 +353,104 @@ final class CleanupSafetyTests: XCTestCase {
         let result = await executor(tools).perform(step([Target("r1")], action: action, kind: .dockerBuildCache), previewTime: .now)
         guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
         XCTAssertFalse(tools.calls.contains { $0.contains("prune") })
+    }
+}
+
+final class HistoryStoreTests: XCTestCase {
+    var folder: URL!
+
+    override func setUpWithError() throws {
+        folder = FileManager.default.temporaryDirectory.appending(path: "macstorage-store-\(UUID().uuidString)")
+    }
+
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: folder) }
+
+    func bigRun() -> RunRecord {
+        let targets = (0..<300).map { Target("/cache/file-\($0)", bytes: 1) }
+        let item = Item(id: "o/big", kind: .goBuildCache, name: "Big", onDisk: .bytes(300), reclaimable: .bytes(300), tier: .safe,
+                        explanation: "", targets: targets)
+        let step = CleanupStep(item: item, ownerName: "O", approvedTargets: targets, expectedBytes: 300, destination: .mac)
+        let executed = (0..<10).map { "tool --delete batch-\($0)" }
+        return RunRecord(started: Date(timeIntervalSince1970: 1_800_000_000), finished: Date(timeIntervalSince1970: 1_800_000_100),
+                         steps: [.init(step: step, outcome: .done(measured: 300), executed: executed)])
+    }
+
+    func testHistoryKeepsACompactCopyAndTheRunFileKeepsEverything() throws {
+        let store = HistoryStore(folder: folder)
+        let run = bigRun()
+        let receipt = try store.save(run)
+        let compact = try XCTUnwrap(store.loadHistory().runs.first)
+        XCTAssertEqual(compact.steps[0].step.approvedTargets.count, 200)
+        XCTAssertTrue(compact.steps[0].step.item.targets.isEmpty)
+        XCTAssertEqual(compact.steps[0].executed.count, 4)
+        XCTAssertEqual(store.fullRun(run.id), run)
+        XCTAssertTrue(try String(contentsOf: receipt, encoding: .utf8).contains("/cache/file-299"))
+    }
+
+    func testAReceiptIsNeverRewrittenFromTheCompactCopy() throws {
+        let store = HistoryStore(folder: folder)
+        let run = bigRun()
+        let written = try store.save(run)
+        let compact = try XCTUnwrap(store.loadHistory().runs.first)
+        XCTAssertEqual(try store.receipt(compact), written)
+        XCTAssertTrue(try String(contentsOf: written, encoding: .utf8).contains("/cache/file-299"))
+    }
+
+    func testALaterTrashDeletionUpdatesTheFullRecord() throws {
+        let store = HistoryStore(folder: folder)
+        var run = bigRun()
+        try store.save(run)
+        run.trashDeletions.append(.init(date: .now, deleted: [], refused: ["/gone"]))
+        try store.save(run)
+        XCTAssertEqual(store.fullRun(run.id)?.trashDeletions.count, 1)
+        XCTAssertEqual(store.loadHistory().runs.count, 1)
+    }
+
+    func testAnUnreadableHistoryIsMovedAsideNotOverwritten() throws {
+        let store = HistoryStore(folder: folder)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: folder.appending(path: "history.json"))
+        XCTAssertEqual(store.loadHistory(), History())
+        let aside = try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasPrefix("history-unreadable-") }
+        XCTAssertEqual(aside.count, 1)
+    }
+}
+
+final class ShellTests: XCTestCase {
+    func testOutputBeyondTheCapIsReportedAsTruncated() async throws {
+        let out = try await Shell.run(URL(fileURLWithPath: "/bin/sh"), ["-c", "head -c 20000000 /dev/zero"], environment: [:], timeout: .seconds(30))
+        XCTAssertTrue(out.truncated)
+        XCTAssertFalse(out.succeeded)
+        XCTAssertLessThanOrEqual(out.stdout.utf8.count, Shell.maxOutputBytes)
+    }
+
+    func testATimeoutStopsTheProcess() async throws {
+        let started = ContinuousClock.now
+        let out = try await Shell.run(URL(fileURLWithPath: "/bin/sleep"), ["30"], environment: [:], timeout: .milliseconds(300))
+        XCTAssertTrue(out.timedOut)
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(10))
+    }
+}
+
+final class RunningAppsTests: XCTestCase {
+    func testCachesMatchByBundleIDNameOrVendor() {
+        XCTAssertTrue(RunningApps.matches("com.tinyspeck.slackmacgap", bundleID: "com.tinyspeck.slackmacgap", name: "Slack"))
+        XCTAssertTrue(RunningApps.matches("Google", bundleID: "com.google.Chrome", name: "Google Chrome"))
+        XCTAssertTrue(RunningApps.matches("JetBrains", bundleID: "com.jetbrains.intellij", name: "IntelliJ IDEA"))
+        XCTAssertTrue(RunningApps.matches("Slack", bundleID: "com.tinyspeck.slackmacgap", name: "Slack"))
+        XCTAssertFalse(RunningApps.matches("ms-playwright", bundleID: "com.google.Chrome", name: "Google Chrome"))
+        XCTAssertFalse(RunningApps.matches("com.google", bundleID: "com.googlex.app", name: "X"))
+    }
+}
+
+final class ProviderTests: XCTestCase {
+    func testDeviceSupportSortsByOSVersion() {
+        XCTAssertEqual(XcodeProvider.osVersion("/x/iOS DeviceSupport/iPhone15,2 17.10 (21C62)"), "17.10")
+        XCTAssertEqual(["17.2", "17.10", "16.4"].sorted { $0.compare($1, options: .numeric) == .orderedDescending }, ["17.10", "17.2", "16.4"])
+    }
+
+    func testAppKeysStripTeamIDs() {
+        XCTAssertEqual(LibraryProvider.appKey("HUAZ8B5R3S.dev.orbstack"), "dev.orbstack")
+        XCTAssertEqual(LibraryProvider.appKey("group.com.docker"), "com.docker")
     }
 }

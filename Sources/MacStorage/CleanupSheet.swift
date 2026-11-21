@@ -5,22 +5,39 @@ struct CleanupSheet: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        switch model.sheet {
-        case .preview(let plan): PreviewPhase(model: model, plan: plan)
-        case .running(let plan, let current, let outcomes): RunningPhase(model: model, plan: plan, current: current, outcomes: outcomes)
-        case .results(let run): ResultsPhase(model: model, run: run)
-        case nil: EmptyView()
+        Group {
+            switch model.sheet {
+            case .preview(let plan): PreviewPhase(model: model, plan: plan)
+            case .running(let plan, let current, let outcomes): RunningPhase(model: model, plan: plan, current: current, outcomes: outcomes)
+            case .results(let run): ResultsPhase(model: model, run: run)
+            case nil: EmptyView()
+            }
         }
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
+/// Three figures side by side, one per destination: never added together.
 struct Totals: View {
-    let mac: Int64, trash: Int64, docker: Int64
+    let values: [(value: String, caption: String, detail: String?)]
+
+    /// Before a run: what each destination is expected to get back.
+    init(plan: CleanupPlan) {
+        values = Destination.allCases.map { (formatBytes(plan.expected($0), upperBound: plan.isUpperBound($0)), $0.label, nil) }
+    }
+
+    init(_ values: [(value: String, caption: String, detail: String?)]) { self.values = values }
 
     var body: some View {
-        HStack(spacing: 10) {
-            ForEach([(mac, Destination.mac.label), (trash, Destination.trash.label), (docker, Destination.containerDisk.label)], id: \.1) { value, label in
-                SizeBox(value: Text(formatBytes(value)), caption: label)
+        HStack(alignment: .top, spacing: 10) {
+            ForEach(values, id: \.caption) { v in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(v.value).font(.title3.weight(.semibold)).monospacedDigit()
+                    Text(v.caption).font(.caption).foregroundStyle(.secondary)
+                    if let detail = v.detail { Text(detail).font(.caption).foregroundStyle(.secondary).monospacedDigit() }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8).overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
             }
         }
     }
@@ -35,7 +52,7 @@ struct PreviewPhase: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Review \(plural(plan.steps.count, "cleanup step"))").font(.title3.weight(.semibold))
-                Totals(mac: plan.expected(.mac), trash: plan.expected(.trash), docker: plan.expected(.containerDisk))
+                Totals(plan: plan)
             }
             .padding(20)
             Divider()
@@ -47,25 +64,27 @@ struct PreviewPhase: View {
                         HStack { TierBadge(tier: tier); Text(plural(plan.steps.filter { $0.item.tier == tier }.count, "step")).foregroundStyle(.secondary) }
                     }
                 }
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 10) {
+                // The confirmation sits next to Run, where it's needed.
                 if !plan.pickedSteps.isEmpty {
                     Toggle(isOn: $confirmedPicks) {
                         Text("I've checked the \(plural(plan.pickedSteps.map(\.approvedTargets.count).reduce(0, +), "file")) I picked myself (\(plan.pickedSteps.map(\.ownerName).joined(separator: ", "))). They are my own files and go to the Trash.")
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .toggleStyle(.checkbox)
                 }
-            }
-            Divider()
-            HStack {
-                Text("Before each step the app checks its list again. If anything changed, it skips that step and tells you.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                if !plan.pickedSteps.isEmpty, !confirmedPicks {
-                    Text("Tick the confirmation for your picked files to enable Run.").font(.caption).foregroundStyle(.orange)
+                HStack {
+                    Text("Before each step the app checks its list again. If anything changed, it skips that step and tells you.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel", role: .cancel) { model.sheet = nil }.keyboardShortcut(.cancelAction)
+                    Button("Run \(plural(plan.steps.count, "step"))") { model.run(plan) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!plan.pickedSteps.isEmpty && !confirmedPicks)
+                        .help(!plan.pickedSteps.isEmpty && !confirmedPicks ? "Tick the confirmation for your picked files first." : "")
                 }
-                Button("Cancel", role: .cancel) { model.sheet = nil }.keyboardShortcut(.cancelAction)
-                Button("Run \(plural(plan.steps.count, "step"))") { model.run(plan) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!plan.pickedSteps.isEmpty && !confirmedPicks)
             }
             .padding(16)
         }
@@ -81,12 +100,12 @@ struct StepPreview: View {
             HStack {
                 Text("\(step.ownerName) · \(step.item.name)")
                 Spacer()
-                Text((step.item.reclaimableIsUpperBound ? "≤ " : "") + formatBytes(step.expectedBytes)).fontWeight(.semibold).monospacedDigit()
+                Text(formatBytes(step.expectedBytes, upperBound: step.item.reclaimableIsUpperBound)).fontWeight(.semibold).monospacedDigit()
             }
             Text(commandLine).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
                 .padding(6).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
             if case .clearFolder(_, let root, _) = step.item.action { Text("Resolved: \(root)").font(.caption).foregroundStyle(.secondary) }
-            ForEach(warnings, id: \.self) { Label($0, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange) }
+            ForEach(warnings, id: \.self) { Label($0, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(Color.warningText) }
             if !step.approvedTargets.isEmpty {
                 DisclosureGroup("Show exactly what this removes (\(plural(step.approvedTargets.count, step.item.targetUnit)))", isExpanded: $showList) {
                     TargetList(targets: step.approvedTargets, unit: step.item.targetUnit)
@@ -123,21 +142,32 @@ struct RunningPhase: View {
     @FocusState private var stopFocused: Bool
 
     var body: some View {
+        let finished = outcomes.compactMap { $0 }.count
         VStack(alignment: .leading, spacing: 12) {
-            Text("Cleaning up: step \(current + 1) of \(plan.steps.count)").font(.title3.weight(.semibold))
+            Text("Cleaning up: step \(min(current + 1, plan.steps.count)) of \(plan.steps.count)").font(.title3.weight(.semibold))
             Text("Steps run one at a time. Stopping lets the current step finish with its real outcome.").foregroundStyle(.secondary)
             List(Array(plan.steps.enumerated()), id: \.offset) { i, step in
                 HStack {
                     OutcomeIcon(outcome: outcomes[i], running: i == current && outcomes[i] == nil)
                     Text("\(step.ownerName) · \(step.item.name)")
                     Spacer()
-                    if case .skipped(let why)? = outcomes[i] { Text(why).font(.caption).foregroundStyle(.orange).lineLimit(2) }
+                    switch outcomes[i] {
+                    case .skipped(let why)?: Text(why).font(.caption).foregroundStyle(Color.warningText).lineLimit(2)
+                    case let o? where o.didRun: Text(o.measured.map(formatBytes) ?? "≈ \(formatBytes(step.expectedBytes))").monospacedDigit().foregroundStyle(.secondary)
+                    case .failed?: Text("failed").foregroundStyle(Color.errorText)
+                    default: Text(formatBytes(step.expectedBytes, upperBound: step.item.reclaimableIsUpperBound)).monospacedDigit().foregroundStyle(.tertiary)
+                    }
                 }
             }
             HStack {
-                Text("\(outcomes.compactMap { $0 }.count) of \(plan.steps.count) done").foregroundStyle(.secondary)
+                Text("\(finished) of \(plural(plan.steps.count, "step")) finished").foregroundStyle(.secondary)
                 Spacer()
-                Button("Stop after this step", action: model.stopRun).keyboardShortcut(.cancelAction).focused($stopFocused)
+                if model.stopping {
+                    ProgressView().controlSize(.small)
+                    Text("Stopping after this step…").foregroundStyle(.secondary)
+                } else {
+                    Button("Stop after this step", action: model.stopRun).keyboardShortcut(.cancelAction).focused($stopFocused)
+                }
             }
         }
         .padding(20)
@@ -156,7 +186,7 @@ struct OutcomeIcon: View {
         case .skipped?: Image(systemName: "arrow.uturn.right.circle").foregroundStyle(.orange).accessibilityLabel("Skipped")
         case .failed?: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red).accessibilityLabel("Failed")
         case .notRun?: Image(systemName: "minus.circle").foregroundStyle(.secondary).accessibilityLabel("Not run")
-        case nil: running ? AnyView(ProgressView().controlSize(.small)) : AnyView(Image(systemName: "circle").foregroundStyle(.tertiary))
+        case nil: running ? AnyView(ProgressView().controlSize(.small).accessibilityLabel("Running")) : AnyView(Image(systemName: "circle").foregroundStyle(.tertiary).accessibilityLabel("Waiting"))
         }
     }
 }
@@ -167,22 +197,21 @@ struct ResultsPhase: View {
     @State private var confirmingDelete = false
     @State private var includePicked = false
     @State private var receiptURL: URL?
+    @State private var receiptError: String?
     @State private var deleting = false
+    @State private var confirmingClose = false
 
     var body: some View {
         let inTrash = run.stillInTrash
         VStack(alignment: .leading, spacing: 12) {
             Text("Cleanup finished").font(.title3.weight(.semibold))
             Text(summary).foregroundStyle(.secondary)
-            Totals(mac: run.freedOnMac, trash: inTrash.map(\.bytes).reduce(0, +), docker: run.freed(.containerDisk))
-            let predicted = Destination.allCases.map { run.unmeasured($0) }.reduce(0, +)
-            if predicted > 0 {
-                Text("Plus about \(formatBytes(predicted)) predicted for steps whose space couldn't be re-measured.").font(.caption).foregroundStyle(.secondary)
-            }
-            if let error = model.saveError {
+            Totals(totals(inTrash))
+            Text("Sizes are measured after each step where the tool allows it; “predicted” marks the rest.").font(.caption).foregroundStyle(.secondary)
+            if let error = model.unsavedRuns[run.id] {
                 HStack {
-                    Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Button("Try again") { model.persist(run) }
+                    Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Color.warningText)
+                    Button("Try again") { Task { await model.persist(run) } }
                 }
             }
             if !inTrash.isEmpty { trashBox(inTrash) }
@@ -193,37 +222,80 @@ struct ResultsPhase: View {
             }
             List(run.steps, id: \.step.id) { r in
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack { OutcomeIcon(outcome: r.outcome); Text("\(r.step.ownerName) · \(r.step.item.name)"); Spacer(); Text(outcomeText(r)).foregroundStyle(.secondary) }
+                    HStack {
+                        OutcomeIcon(outcome: r.outcome)
+                        Text("\(r.step.ownerName) · \(r.step.item.name)")
+                        Spacer()
+                        Text(outcomeText(r)).monospacedDigit().foregroundStyle(.secondary)
+                    }
                     switch r.outcome {
                     case .skipped(let why):
                         HStack {
-                            Text(why).font(.caption).foregroundStyle(.orange)
+                            Text(why + " It's unticked until you scan again.").font(.caption).foregroundStyle(Color.warningText)
                             Button("View the approved list") { model.sheet = nil; model.show(owner: ownerID(r), item: r.step.item.id) }.buttonStyle(.link).font(.caption)
                         }
                     case .partial(_, let problems):
-                        ForEach(problems, id: \.self) { Text($0).font(.caption).foregroundStyle(.orange) }
+                        ForEach(problems, id: \.self) { Text($0).font(.caption).foregroundStyle(Color.warningText) }
                     case .notRun(let why):
                         Text(why + " Nothing was changed.").font(.caption).foregroundStyle(.secondary)
                     case .failed(let e):
-                        Text(e).font(.caption).foregroundStyle(.red)
+                        Text(e).font(.caption).foregroundStyle(Color.errorText)
                     case .done:
                         EmptyView()
+                    }
+                    if !r.leftAlone.isEmpty {
+                        DisclosureGroup("\(plural(r.leftAlone.count, "item")) left alone") {
+                            ForEach(r.leftAlone, id: \.self) { Text($0).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+                        }
+                        .font(.caption)
                     }
                 }
             }
             HStack {
                 if let receiptURL {
-                    Label("Saved to \(receiptURL.path(percentEncoded: false))", systemImage: "checkmark").font(.caption).foregroundStyle(.green)
+                    Label("Saved to \(receiptURL.path(percentEncoded: false))", systemImage: "checkmark").font(.caption).foregroundStyle(Color.successText)
                     Button("Show in Finder") { revealInFinder(receiptURL.path) }.buttonStyle(.link).font(.caption)
+                } else if let receiptError {
+                    Label("The receipt couldn't be saved: \(receiptError)", systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(Color.warningText)
                 } else {
                     Button("Open in History") { model.sheet = nil; model.section = .history; model.openRunID = run.id }.buttonStyle(.link)
                 }
                 Spacer()
-                Button("Save receipt…") { receiptURL = model.receiptURL(run) }.disabled(model.demo).help(model.demo ? "Demo mode doesn't write files." : "")
-                Button("Done") { model.sheet = nil }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                Button("Show receipt file") {
+                    Task {
+                        switch await model.receipt(run) {
+                        case .success(let url): receiptURL = url; receiptError = nil
+                        case .failure(let error): receiptError = error.localizedDescription
+                        }
+                    }
+                }
+                .disabled(model.demo).help(model.demo ? "Demo mode doesn't write files." : "Every cleanup's receipt is saved automatically.")
+                Button("Done") { if model.unsavedRuns[run.id] != nil { confirmingClose = true } else { model.sheet = nil } }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
+        .confirmationDialog("This cleanup's record isn't saved", isPresented: $confirmingClose) {
+            Button("Try saving again") { Task { await model.persist(run) } }
+            Button("Close without saving", role: .destructive) { model.sheet = nil }
+        } message: {
+            Text("It stays in History until you quit, but won't be there after a relaunch.")
+        }
+    }
+
+    /// After the run: what each destination got, measured where possible, next to the prediction.
+    private func totals(_ inTrash: [TrashEntry]) -> [(value: String, caption: String, detail: String?)] {
+        func detail(_ d: Destination) -> String? {
+            let predicted = run.predicted(d), unmeasured = run.unmeasured(d)
+            guard predicted > 0 else { return nil }
+            return "predicted \(formatBytes(predicted))" + (unmeasured > 0 ? "; \(formatBytes(unmeasured)) of it not re-measured" : "")
+        }
+        let inTrashBytes = inTrash.map(\.bytes).reduce(0, +)
+        return [
+            (formatBytes(run.freedOnMac), run.deletedFromTrash > 0 ? "Freed on your Mac, including \(formatBytes(run.deletedFromTrash)) deleted from the Trash" : "Freed on your Mac", detail(.mac)),
+            (formatBytes(inTrashBytes), "Now in the Trash (\(plural(inTrash.count, "item"))), freed when you empty it", detail(.trash)),
+            (formatBytes(run.freed(.containerDisk)), "Freed inside Docker's disk; the disk file shrinks later", detail(.containerDisk)),
+        ]
     }
 
     @ViewBuilder
@@ -269,16 +341,18 @@ struct ResultsPhase: View {
         let skipped = run.steps.filter { if case .skipped = $0.outcome { true } else { false } }.count
         let notRun = run.steps.filter { if case .notRun = $0.outcome { true } else { false } }.count
         let failed = run.steps.filter { if case .failed = $0.outcome { true } else { false } }.count
-        return "\(run.doneCount) of \(plural(run.steps.count, "step")) done" + (skipped > 0 ? ", \(skipped) skipped" : "")
+        return run.progressText + (skipped > 0 ? ", \(skipped) skipped" : "")
             + (failed > 0 ? ", \(failed) failed" : "") + (notRun > 0 ? ", \(notRun) not run" : "") + "."
     }
 
+    /// "16.2 GB measured · predicted 16.7 GB", or the prediction alone when it couldn't be measured.
     private func outcomeText(_ r: RunRecord.StepResult) -> String {
+        let predicted = formatBytes(r.step.expectedBytes, upperBound: r.step.item.reclaimableIsUpperBound)
         switch r.outcome {
-        case .done(let m), .partial(let m, _): m.map(formatBytes) ?? "≈ \(formatBytes(r.step.expectedBytes)) predicted"
-        case .skipped: "skipped"
-        case .notRun: "not run"
-        case .failed: "failed"
+        case .done(let m), .partial(let m, _): return m.map { "\(formatBytes($0)) measured · predicted \(predicted)" } ?? "\(predicted) predicted, not re-measured"
+        case .skipped: return "skipped"
+        case .notRun: return "not run"
+        case .failed: return "failed"
         }
     }
 

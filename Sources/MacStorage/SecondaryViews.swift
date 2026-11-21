@@ -4,10 +4,11 @@ import SwiftUI
 
 struct FoldersView: View {
     @Bindable var model: AppModel
+    @State private var order = [KeyPathComparator(\FolderEntry.sortBytes, order: .reverse)]
 
     var body: some View {
         if let s = model.snapshot {
-            let rows = s.folders[model.folderPath] ?? []
+            let rows = (s.folders[model.folderPath] ?? []).sorted(using: order)
             HSplitView {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -22,10 +23,13 @@ struct FoldersView: View {
                     Treemap(nodes: rows.compactMap { r in r.bytes.map { TreemapNode(id: r.name, label: r.name, value: Double($0), reclaimable: 0, color: r.kind.color) } },
                             selected: model.selectedFolder) { model.selectedFolder = $0 }
                         .frame(height: 260)
-                    Table(rows, selection: $model.selectedFolder) {
-                        TableColumn("Folder") { r in Label(r.name, systemImage: r.hasChildren ? "folder.fill" : "folder") }
-                        TableColumn("Mostly") { r in Text(r.bytes == nil ? "Unknown" : r.kind.label).foregroundStyle(.secondary) }.width(140)
-                        TableColumn("On disk") { r in
+                    if rows.isEmpty {
+                        Callout(s.isPartial ? "Folder sizes weren't measured: the scan stopped before they were." : "Nothing was measured at this level.")
+                    }
+                    Table(rows, selection: $model.selectedFolder, sortOrder: $order) {
+                        TableColumn("Folder", value: \.name) { r in Label(r.name, systemImage: r.hasChildren ? "folder.fill" : "folder") }
+                        TableColumn("Mostly", value: \.kind.label) { r in Text(r.bytes == nil ? "Unknown" : r.kind.label).foregroundStyle(.secondary) }.width(140)
+                        TableColumn("On disk", value: \.sortBytes) { r in
                             if let b = r.bytes {
                                 HStack(spacing: 4) { Text(formatBytes(b)).monospacedDigit(); if r.isPartial { Text("partial").font(.caption2).foregroundStyle(.secondary) } }
                             } else {
@@ -46,6 +50,11 @@ struct FoldersView: View {
             }
         }
     }
+}
+
+extension FolderEntry {
+    /// For sorting: unknown sizes last.
+    var sortBytes: Int64 { bytes ?? -1 }
 }
 
 struct FolderDetail: View {
@@ -165,7 +174,7 @@ struct HistoryView: View {
             }.width(100)
             TableColumn("Why") { (c: OwnerChange) in Text(c.notes.joined(separator: "; ")).foregroundStyle(.secondary) }
         })
-        .frame(height: CGFloat(max(changes.count, 1)) * 28 + 32)
+        .frame(height: CGFloat(max(changes.count, 1)) * 26 + 34)
     }
 
     private func label(_ s: ScanSummary) -> String { s.date.formatted(date: .abbreviated, time: .omitted) }
@@ -183,17 +192,13 @@ struct CleanupsLog: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text(run.started.formatted(date: .abbreviated, time: .shortened))
-                        Text("\(run.doneCount) of \(plural(run.steps.count, "step")) done").foregroundStyle(.secondary)
+                        Text(run.progressText).foregroundStyle(.secondary)
                         Spacer()
                         Text("\(formatBytes(run.freedOnMac)) freed · \(formatBytes(run.stillInTrash.map(\.bytes).reduce(0, +))) in the Trash · \(formatBytes(run.freed(.containerDisk))) in Docker's disk")
                             .monospacedDigit().foregroundStyle(.secondary)
                         Button(open.contains(run.id) ? "Hide receipt" : "View receipt") { toggle(run.id) }.buttonStyle(.link)
                     }
-                    if open.contains(run.id) {
-                        Text(Receipt.text(run)).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
-                    }
+                    if open.contains(run.id) { ReceiptView(model: model, run: run) }
                 }
                 Divider()
             }
@@ -202,6 +207,26 @@ struct CleanupsLog: View {
     }
 
     private func toggle(_ id: UUID) { if open.contains(id) { open.remove(id) } else { open.insert(id) } }
+}
+
+/// A run's receipt, read from the full record (History keeps a compact copy).
+struct ReceiptView: View {
+    let model: AppModel
+    let run: RunRecord
+    @State private var text: String?
+
+    var body: some View {
+        Group {
+            if let text {
+                Text(text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
+        .task(id: run) { text = Receipt.text(await model.fullRun(run)) }
+    }
 }
 
 struct CleanupView: View {
@@ -226,8 +251,12 @@ struct CleanupView: View {
                                             Text(commandText(item)).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
                                         }
                                         Spacer()
+                                        if model.cleanupState.partlyCleaned[item.id] != nil {
+                                            Text("partly cleaned today").font(.caption).foregroundStyle(.secondary)
+                                        }
                                         Text(item.action.destination?.label ?? "").font(.caption).foregroundStyle(.secondary)
-                                        MeasureText(measure: item.reclaimable).frame(width: 80, alignment: .trailing)
+                                        HStack(spacing: 2) { if item.reclaimableIsUpperBound { Text("≤") }; MeasureText(measure: item.reclaimable) }
+                                            .frame(width: 90, alignment: .trailing)
                                     }
                                 }
                                 .toggleStyle(.checkbox)
@@ -260,11 +289,11 @@ struct CleanupView: View {
                 }
                 Divider()
                 HStack {
-                    Text("\(plural(plan.steps.count, "step")) · \(formatBytes(plan.expected(.mac))) right away, \(formatBytes(plan.expected(.trash))) after emptying the Trash, \(formatBytes(plan.expected(.containerDisk))) inside Docker's disk")
+                    Text("\(plural(plan.steps.count, "step")) · \(formatBytes(plan.expected(.mac), upperBound: plan.isUpperBound(.mac))) right away, \(formatBytes(plan.expected(.trash), upperBound: plan.isUpperBound(.trash))) after emptying the Trash, \(formatBytes(plan.expected(.containerDisk), upperBound: plan.isUpperBound(.containerDisk))) inside Docker's disk")
                         .foregroundStyle(.secondary)
                     Spacer()
                     if model.scanIsTooOld {
-                        Text("The last scan is more than a day old. Scan again before cleaning up, so the lists are current.").font(.caption).foregroundStyle(.orange)
+                        Text("The last scan is more than a day old. Scan again before cleaning up, so the lists are current.").font(.caption).foregroundStyle(Color.warningText)
                     }
                     Button("Preview cleanup…", action: model.openPreview).buttonStyle(.borderedProminent)
                         .disabled(plan.steps.isEmpty || model.scanIsTooOld).keyboardShortcut(.defaultAction)
@@ -290,20 +319,34 @@ struct CoverageView: View {
 
     var body: some View {
         if let s = model.snapshot {
-            Table(s.coverage) {
-                TableColumn("Status") { c in
-                    switch c.status {
-                    case .measured: Label("Measured", systemImage: "checkmark").foregroundStyle(.green)
-                    case .skipped: Label("Skipped", systemImage: "minus").foregroundStyle(.secondary)
-                    case .noAccess: Label("No access", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    case .notMeasured: Label("Not measured", systemImage: "minus").foregroundStyle(.secondary)
+            // A list, not a table: details wrap instead of being cut off.
+            List(s.coverage) { c in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    status(c.status).frame(width: 120, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(c.area).fontWeight(.medium)
+                        Text(c.detail).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if c.status == .noAccess, !model.fullDiskAccess {
+                            Button("Open Privacy & Security…", action: FullDiskAccess.openSettings).buttonStyle(.link)
+                        }
                     }
-                }.width(120)
-                TableColumn("Area") { c in Text(c.area) }.width(200)
-                TableColumn("Details") { c in Text(c.detail).fixedSize(horizontal: false, vertical: true) }
-                TableColumn("Time") { c in Text(c.seconds.map { String(format: "%.1f s", $0) } ?? "").monospacedDigit().foregroundStyle(.secondary) }.width(60)
+                    Spacer()
+                    Text(c.seconds.map { String(format: "%.1f s", $0) } ?? "").monospacedDigit().foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
             }
-            .padding(12)
+        }
+    }
+
+    @ViewBuilder
+    private func status(_ s: CoverageEntry.Status) -> some View {
+        switch s {
+        case .measured: Label { Text("Measured") } icon: { Image(systemName: "checkmark").foregroundStyle(.green) }
+        case .skipped: Label("Skipped", systemImage: "minus").foregroundStyle(.secondary)
+        case .noAccess: Label { Text("No access") } icon: { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+        case .notMeasured: Label("Not measured", systemImage: "minus").foregroundStyle(.secondary)
+        case .stopped: Label("Not finished", systemImage: "pause.circle").foregroundStyle(.secondary)
+        case .failed: Label { Text("Failed") } icon: { Image(systemName: "xmark.octagon.fill").foregroundStyle(.red) }
         }
     }
 }
@@ -317,13 +360,25 @@ struct WelcomeView: View {
             Text("macstorage measures what each tool, app and project uses, tells you what you'd really get back, and only removes things after showing you exactly what goes. It works offline and never sends anything anywhere.")
                 .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 560)
             VStack(alignment: .leading, spacing: 8) {
-                Label { Text("**Give it Full Disk Access** (recommended). Without it, macOS hides Downloads, Documents, Mail and other apps' data.") } icon: { Text("1.") }
-                Button("Open Privacy & Security…", action: FullDiskAccess.openSettings).buttonStyle(.link).padding(.leading, 22)
-                Label { Text("**Run the first scan.** It reads sizes and asks your tools what they hold. A full scan takes a few minutes.") } icon: { Text("2.") }
-                Label { Text("**Nothing is deleted** until you've reviewed a cleanup preview.") } icon: { Text("3.") }
+                if model.fullDiskAccess {
+                    Label { Text("**Full Disk Access is on**, so Downloads, Documents and other apps' data are included.") } icon: { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                } else {
+                    Label { Text("**Give it Full Disk Access** (recommended). Without it, macOS hides Downloads, Documents, Mail and other apps' data.") } icon: { Text("1.") }
+                    Button("Open Privacy & Security…", action: FullDiskAccess.openSettings).buttonStyle(.link).padding(.leading, 22)
+                }
+                Label { Text("**Run the first scan.** It reads sizes and asks your tools what they hold. A full scan takes a few minutes; results appear as each area finishes.") } icon: { Text(model.fullDiskAccess ? "1." : "2.") }
+                Label { Text("**Nothing is deleted** until you've reviewed a cleanup preview.") } icon: { Text(model.fullDiskAccess ? "2." : "3.") }
             }
             .frame(maxWidth: 520, alignment: .leading)
-            Button("Scan this Mac", action: model.scan).buttonStyle(.borderedProminent).controlSize(.large)
+            if let p = model.scanning {
+                ProgressView(value: Double(p.finished.count), total: Double(max(p.total, 1))) {
+                    Text("Scanning \(p.running.first ?? "…")")
+                }
+                .frame(maxWidth: 360)
+                Button("Stop scan", action: model.stopScan)
+            } else {
+                Button("Scan this Mac", action: model.scan).buttonStyle(.borderedProminent).controlSize(.large).disabled(model.demo)
+            }
             Text("Container engines that aren't running are left alone. The app never asks for your admin password.").font(.caption).foregroundStyle(.secondary)
         }
         .padding(40)

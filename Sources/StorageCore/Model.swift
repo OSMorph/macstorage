@@ -54,6 +54,10 @@ public enum Destination: String, Codable, CaseIterable, Sendable {
     /// Freed inside a container engine's VM disk, which shrinks on its own schedule.
     case containerDisk
 
+    /// Space that comes back on the Mac's own disk (right away or once the Trash is
+    /// emptied), unlike space freed inside a container engine's VM disk.
+    public var isOnHost: Bool { self != .containerDisk }
+
     public var label: String {
         switch self {
         case .mac: "Freed on your Mac right away"
@@ -158,12 +162,24 @@ public struct Target: Codable, Equatable, Hashable, Sendable {
     /// For files and folders: what the scan saw, so the app can refuse to act if the
     /// path now points at something else or has changed since.
     public var identity: FileIdentity?
+    /// For names that can be re-pointed (a Docker tag): what the name meant at scan time
+    /// (the image ID). The app refuses to act if the name now means something else.
+    public var fingerprint: String?
 
-    public init(_ id: String, bytes: Int64? = nil, identity: FileIdentity? = nil) {
+    public init(_ id: String, bytes: Int64? = nil, identity: FileIdentity? = nil, fingerprint: String? = nil) {
         self.id = id
         self.bytes = bytes
         self.identity = identity
+        self.fingerprint = fingerprint
     }
+}
+
+/// What must still hold for an item's command to act on what the user reviewed.
+public enum ScopeGuard: Codable, Equatable, Hashable, Sendable {
+    /// The folder a clear-folder command empties must still be this directory.
+    case folder(FileIdentity)
+    /// The Docker context must still reach this engine.
+    case dockerEngine(id: String)
 }
 
 /// Identifies one filesystem object: the same path holding a different or modified object
@@ -178,6 +194,9 @@ public struct FileIdentity: Codable, Equatable, Hashable, Sendable {
         self.inode = inode
         self.modified = modified
     }
+
+    /// The same filesystem object, whether or not its contents changed since.
+    public func isSameObject(as other: FileIdentity) -> Bool { device == other.device && inode == other.inode }
 }
 
 /// Something an owner holds, with its sizes, recommendation and action.
@@ -186,9 +205,10 @@ public struct Item: Codable, Identifiable, Equatable, Sendable {
     public var id: String
     public var kind: ItemKind
     public var name: String
-    /// On disk, counting blocks shared with other files (APFS clones, hard links) once.
+    /// Allocated on disk. Hard links count once within one measurement; blocks shared
+    /// between APFS clones count in full (`sharedBytes` says how much is shared).
     public var onDisk: Measure
-    /// Bytes this item shares with other files, not included in `onDisk`.
+    /// Bytes of `onDisk` shared with other files (APFS clones), so not freed by removing this.
     public var sharedBytes: Int64?
     /// What the user would get back.
     public var reclaimable: Measure
@@ -210,12 +230,14 @@ public struct Item: Codable, Identifiable, Equatable, Sendable {
     public var path: String?
     /// For app caches: the app that must not be running while its cache is trashed.
     public var appBundleID: String?
+    /// Checked right before the item's command runs.
+    public var scopeGuard: ScopeGuard?
 
     public init(id: String, kind: ItemKind, name: String, onDisk: Measure, sharedBytes: Int64? = nil,
                 reclaimable: Measure, reclaimableIsUpperBound: Bool = false, tier: Tier,
                 explanation: String, basis: String? = nil, action: Action = .none,
                 targets: [Target] = [], targetUnit: String = "item", targetsComplete: Bool = true,
-                path: String? = nil, appBundleID: String? = nil) {
+                path: String? = nil, appBundleID: String? = nil, scopeGuard: ScopeGuard? = nil) {
         self.id = id
         self.kind = kind
         self.name = name
@@ -232,6 +254,7 @@ public struct Item: Codable, Identifiable, Equatable, Sendable {
         self.targetsComplete = targetsComplete
         self.path = path
         self.appBundleID = appBundleID
+        self.scopeGuard = scopeGuard
     }
 
     /// The app may include this item in a cleanup run without the user picking files.
@@ -250,7 +273,8 @@ public struct Owner: Codable, Identifiable, Equatable, Sendable {
     /// True when the owner's space is on another volume than the Data volume (Nix, macOS).
     public var isOwnVolume: Bool
     /// What the owner occupies on the Mac when that differs from the sum of its items:
-    /// a container engine's VM disk, whose items are sized inside the VM.
+    /// a container engine's VM disk, whose items are sized inside the VM. When the disk
+    /// file can't be found, the sum of the items stands in, as a lower bound.
     public var hostBytes: Int64?
     public var items: [Item]
 

@@ -16,16 +16,19 @@ public final class StopSignal: @unchecked Sendable {
 /// Runs an approved cleanup plan and records exactly what happened, target by target.
 ///
 /// Guarantees:
-/// - Commands run as argument arrays on the approved targets, or after re-checking scope.
+/// - Commands run as argument arrays, only while what they act on is still what the user
+///   reviewed: the same engine and image for each Docker tag, the same listing for
+///   re-checked tools, the same folder with no new files for folder-clearing tools.
 /// - Only files inside the home folder are moved to the Trash, and only if each is still
 ///   the object the scan saw (same device, inode and modification time). Symlinked parent
 ///   folders are resolved before the containment check.
-/// - A step that fails or only partly succeeds stops the run.
+/// - Every command the app starts is recorded, including one that fails; a step that
+///   fails or only partly succeeds stops the run.
 /// - Freed space is re-measured where it can be; otherwise the record says it wasn't.
 ///
-/// The check and the move are separate system calls, so a file swapped in between by
-/// another process of the same user could still be moved. That process could delete it
-/// anyway, so this isn't treated as a boundary worth more machinery.
+/// Each check and the action after it are separate calls, so another process of the same
+/// user could still change things in between. That process could delete the files anyway,
+/// so this isn't treated as a boundary worth more machinery.
 public struct CleanupExecutor: Sendable {
     let tools: any ToolRunning
     let home: String
@@ -35,8 +38,15 @@ public struct CleanupExecutor: Sendable {
         self.home = home
     }
 
-    public func run(_ plan: CleanupPlan, stop: StopSignal, progress: @Sendable (Int, StepOutcome?) -> Void = { _, _ in }) async -> RunRecord {
-        let started = Date()
+    /// Recorded for the step in progress whenever the run is journaled, in case the app
+    /// quits before it finishes.
+    public static let interrupted = "The app quit while this step was running, so its outcome wasn't recorded. Scan again to see what's left."
+
+    /// Runs the plan step by step. `journal` receives the record so far before each step
+    /// (the step about to run marked as interrupted), so it can be saved in case the app quits.
+    public func run(_ plan: CleanupPlan, stop: StopSignal, progress: @Sendable (Int, StepOutcome?) -> Void = { _, _ in },
+                    journal: @Sendable (RunRecord) -> Void = { _ in }) async -> RunRecord {
+        let id = UUID(), started = Date()
         var results: [RunRecord.StepResult] = []
         var haltReason: String?
         for (i, step) in plan.steps.enumerated() {
@@ -44,16 +54,21 @@ public struct CleanupExecutor: Sendable {
                 results.append(.init(step: step, outcome: .notRun(reason: reason)))
                 continue
             }
+            let pending = plan.steps[i...].enumerated().map { n, s in
+                RunRecord.StepResult(step: s, outcome: n == 0 ? .failed(error: Self.interrupted) : .notRun(reason: "The app quit before this step started."))
+            }
+            journal(RunRecord(id: id, started: started, finished: Date(), steps: results + pending))
             progress(i, nil)
             let result = await perform(step, previewTime: plan.previewTime)
             results.append(result)
             progress(i, result.outcome)
             if result.outcome.stopsRun { haltReason = "Not started because an earlier step failed." }
         }
-        return RunRecord(started: started, finished: Date(), steps: results)
+        return RunRecord(id: id, started: started, finished: Date(), steps: results)
     }
 
     func perform(_ step: CleanupStep, previewTime: Date) async -> RunRecord.StepResult {
+        if let problem = await scopeProblem(step) { return .init(step: step, outcome: .skipped(reason: problem)) }
         switch step.item.action {
         case .runOnTargets(let command, _):
             let before = await usage(step)
@@ -67,21 +82,76 @@ public struct CleanupExecutor: Sendable {
             let result = await execute(step, [command.resolvedArguments(previewTime: previewTime)], tool: command.tool)
             return await remeasured(result, before: before)
         case .clearFolder(let command, let root, _):
-            guard await currentRoot(step.item) == root else {
-                return .init(step: step, outcome: .skipped(reason: "The tool now points at a different folder than the one you reviewed."))
-            }
-            let before = FileSizes.measure(root).privateBytes
-            var result = await execute(step, [command.arguments], tool: command.tool)
-            if case .done = result.outcome { result.outcome = .done(measured: max(0, before - FileSizes.measure(root).privateBytes)) }
-            return result
+            return await clearFolder(step, command, root: root)
         case .moveToTrash, .pickToTrash:
-            if let bundleID = step.item.appBundleID, !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty {
-                return .init(step: step, outcome: .skipped(reason: "The app is running. Quit it and run this step again."))
+            if let app = step.item.appBundleID.flatMap(RunningApps.matching) {
+                return .init(step: step, outcome: .skipped(reason: "\(app) is running. Quit it and run this step again."))
             }
-            return moveToTrash(step)
+            return await moveToTrash(step)
         default:
             return .init(step: step, outcome: .failed(error: "This item can't be cleaned by the app."))
         }
+    }
+
+    // MARK: Scope
+
+    /// Why the step no longer acts on what the user reviewed, or nil if it still does.
+    private func scopeProblem(_ step: CleanupStep) async -> String? {
+        if case .dockerEngine(let engineID)? = step.item.scopeGuard {
+            guard let context = Self.dockerContext(step.item),
+                  let out = try? await tools.run("docker", context + ["info", "--format", "{{.ID}}"], timeout: .seconds(20)), out.succeeded,
+                  out.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == engineID else {
+                return "The Docker context no longer reaches the engine you reviewed, or the engine isn't running."
+            }
+        }
+        if step.item.kind == .dockerUnusedImages, !(await imagesUnchanged(step)) {
+            return "An image tag now points at a different image than the one you reviewed, or an image is gone."
+        }
+        return nil
+    }
+
+    /// True when every approved tag or ID still names the image the scan saw.
+    private func imagesUnchanged(_ step: CleanupStep) async -> Bool {
+        guard let context = Self.dockerContext(step.item) else { return false }
+        for batch in stride(from: 0, to: step.approvedTargets.count, by: 500).map({ Array(step.approvedTargets[$0..<min($0 + 500, step.approvedTargets.count)]) }) {
+            guard let out = try? await tools.run("docker", context + ["image", "inspect", "--format", "{{.Id}}"] + batch.map(\.id), timeout: .seconds(120)),
+                  out.succeeded else { return false }
+            let ids = out.stdout.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard ids == batch.map({ $0.fingerprint ?? "" }) else { return false }
+        }
+        return true
+    }
+
+    /// `--context <name>` from a Docker item's command.
+    static func dockerContext(_ item: Item) -> [String]? {
+        guard let args = command(of: item)?.arguments, args.first == "--context", args.count > 1 else { return nil }
+        return Array(args.prefix(2))
+    }
+
+    /// Clears a tool's folder only if it's still the folder the scan saw, holding nothing
+    /// the user didn't review.
+    private func clearFolder(_ step: CleanupStep, _ command: Command, root: String) async -> RunRecord.StepResult {
+        func skip(_ why: String) -> RunRecord.StepResult { .init(step: step, outcome: .skipped(reason: why)) }
+        guard await currentRoot(step.item) == root else { return skip("The tool now points at a different folder than the one you reviewed.") }
+        guard case .folder(let scanned)? = step.item.scopeGuard, let now = FileSizes.directoryIdentity(root), now.isSameObject(as: scanned) else {
+            return skip("The folder was replaced since the scan.")
+        }
+        let real = FileSizes.realPath(root) ?? root
+        let (current, before) = await offload { FileSizes.manifest(real) }
+        guard before.isComplete else { return skip("The folder couldn't be listed completely again.") }
+        let approved = Dictionary(step.approvedTargets.map { ($0.id, $0.identity) }, uniquingKeysWith: { a, _ in a })
+        let unreviewed = current.filter { t in approved[t.id].map { $0 != t.identity } ?? true }.count
+        guard unreviewed == 0 else {
+            return skip("\(plural(unreviewed, "file")) appeared or changed in the folder after you reviewed it. Scan again to review them.")
+        }
+        var result = await execute(step, [command.arguments], tool: command.tool)
+        let after = await offload { () -> Int64? in
+            guard FileSizes.identity(real) != nil else { return 0 }   // the tool removed the folder itself
+            let size = FileSizes.measure(real)
+            return size.isComplete ? size.privateBytes : nil
+        }
+        result.outcome = Self.withMeasured(result.outcome, after.map { max(0, before.privateBytes - $0) })
+        return result
     }
 
     // MARK: Commands
@@ -90,37 +160,54 @@ public struct CleanupExecutor: Sendable {
         stride(from: 0, to: ids.count, by: 500).map { command.arguments + ids[$0..<min($0 + 500, ids.count)] }
     }
 
-    /// Runs each invocation in turn. A failure after earlier invocations succeeded is a
-    /// partial result, and the invocations that ran stay in the record.
+    /// Runs each invocation in turn and records every one that started, with its failure.
+    /// A failure after earlier invocations succeeded is a partial result.
     private func execute(_ step: CleanupStep, _ invocations: [[String]], tool: String) async -> RunRecord.StepResult {
         var executed: [String] = []
         for (n, args) in invocations.enumerated() {
-            let problem: String?
+            let line = ([tool] + args).joined(separator: " ")
+            let problem: String
             do {
                 let out = try await tools.run(tool, args, timeout: .seconds(1_800))
-                problem = out.status == 0 && !out.timedOut ? nil
-                    : out.timedOut ? "Timed out." : out.stderr.split(separator: "\n").last.map(String.init) ?? "Exit status \(out.status)."
+                if out.status == 0, !out.timedOut { executed.append(line); continue }
+                problem = out.timedOut ? "Timed out after 30 minutes and was stopped." : Self.describe(out)
+                executed.append(line + "   [failed: \(problem)]")
             } catch {
-                problem = error.localizedDescription
+                problem = error.localizedDescription   // never started
             }
-            guard let problem else { executed.append(([tool] + args).joined(separator: " ")); continue }
             let label = invocations.count > 1 ? "Batch \(n + 1) of \(invocations.count): \(problem)" : problem
-            return .init(step: step, outcome: executed.isEmpty ? .failed(error: label) : .partial(measured: nil, problems: [label]), executed: executed)
+            return .init(step: step, outcome: n > 0 ? .partial(measured: nil, problems: [label]) : .failed(error: label), executed: executed)
         }
         return .init(step: step, outcome: .done(measured: nil), executed: executed)
     }
 
+    /// The last few lines the tool wrote to stderr, or its exit status.
+    static func describe(_ out: ToolOutput) -> String {
+        let lines = out.stderr.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.suffix(3)
+        return lines.isEmpty ? "Exit status \(out.status)." : String(lines.joined(separator: " / ").prefix(400))
+    }
+
     /// Fills in the measured bytes for a command step from usage before and after.
     private func remeasured(_ result: RunRecord.StepResult, before: Int64?) async -> RunRecord.StepResult {
-        guard let before, let after = await usage(result.step) else { return result }
         var result = result
-        let freed = max(0, before - after)
-        switch result.outcome {
-        case .done: result.outcome = .done(measured: freed)
-        case .partial(_, let problems): result.outcome = .partial(measured: freed, problems: problems)
-        default: break
+        let after = before == nil ? nil : await usage(result.step)
+        let freed = before.flatMap { b in after.map { max(0, b - $0) } }
+        result.outcome = Self.withMeasured(result.outcome, freed)
+        if case .failed(let error) = result.outcome, freed == nil, !result.executed.isEmpty, result.step.approvedTargets.count > 1 {
+            result.outcome = .failed(error: error + " The tool may have removed some targets before it failed; scan again to see what's left.")
         }
         return result
+    }
+
+    /// The outcome with the re-measured bytes. A failed command that still freed space was
+    /// partly done.
+    static func withMeasured(_ outcome: StepOutcome, _ freed: Int64?) -> StepOutcome {
+        switch outcome {
+        case .done: .done(measured: freed)
+        case .partial(_, let problems): .partial(measured: freed, problems: problems)
+        case .failed(let error) where (freed ?? 0) > 0: .partial(measured: freed, problems: [error])
+        default: outcome
+        }
     }
 
     /// Space the step's targets occupy now, measured the way that suits the tool.
@@ -129,15 +216,18 @@ public struct CleanupExecutor: Sendable {
         case .nixDeadPaths:
             return SystemProvider.volumeUsed("/nix")
         case .dockerBuildCache, .dockerUnusedImages:
-            guard let context = Self.command(of: step.item)?.arguments.prefix(2),
-                  let out = try? await tools.run("docker", Array(context) + ["system", "df", "--format", "{{json .}}"], timeout: .seconds(120)),
+            guard let context = Self.dockerContext(step.item),
+                  let out = try? await tools.run("docker", context + ["system", "df", "--format", "{{json .}}"], timeout: .seconds(120)),
                   out.succeeded else { return nil }
             let type = step.item.kind == .dockerBuildCache ? "Build Cache" : "Images"
             return Parse.dockerSystemDF(out.stdout).first { $0.type == type }?.size
         case .homebrewOldVersions, .simulatorsUnavailable:
-            // What's still there of the approved targets.
+            // What's still there of the approved targets. Simulators are listed by UDID,
+            // each a folder in the item's folder.
+            let folder = step.item.kind == .simulatorsUnavailable ? step.item.path : nil
             return step.approvedTargets.reduce(Int64(0)) { sum, t in
-                FileManager.default.fileExists(atPath: expand(t.id)) ? sum + (t.bytes ?? 0) : sum
+                let path = folder.map { $0 + "/" + t.id } ?? expand(t.id)
+                return FileManager.default.fileExists(atPath: path) ? sum + (t.bytes ?? 0) : sum
             }
         default:
             return nil
@@ -153,22 +243,32 @@ public struct CleanupExecutor: Sendable {
 
     // MARK: Trash
 
-    /// Moves each approved path to the Trash, target by target.
-    private func moveToTrash(_ step: CleanupStep) -> RunRecord.StepResult {
-        var moved: [TrashEntry] = [], problems: [String] = []
+    /// Moves each approved path to the Trash, target by target. Targets that are no longer
+    /// what the user approved are left alone and listed; that isn't a failure.
+    private func moveToTrash(_ step: CleanupStep) async -> RunRecord.StepResult {
+        var moved: [TrashEntry] = [], problems: [String] = [], leftAlone: [String] = []
         let realHome = FileSizes.realPath(home) ?? home
         for target in step.approvedTargets {
             let path = expand(target.id)
             guard FileSizes.resolvingAncestors(path).hasPrefix(realHome + "/") else {
-                problems.append("\(target.id) is outside your home folder.")
+                leftAlone.append("\(target.id): outside your home folder.")
                 continue
             }
-            guard let identity = FileSizes.identity(path) else { continue }   // already gone
-            if let expected = target.identity, expected != identity {
-                problems.append("\(target.id) changed since the scan, so it was left alone.")
+            guard let identity = FileSizes.identity(path) else {
+                leftAlone.append("\(target.id): already gone.")
                 continue
             }
-            let bytes = FileSizes.measure(path).privateBytes
+            guard let expected = target.identity,
+                  FileSizes.isDirectory(path) ? identity.isSameObject(as: expected) : identity == expected else {
+                leftAlone.append("\(target.id): replaced or changed since the scan.")
+                continue
+            }
+            if step.item.kind == .gitBuildOutput,
+               let why = await GitProvider.ineligibility(tools, checkout: (path as NSString).deletingLastPathComponent) {
+                leftAlone.append("\(target.id): \(why)")
+                continue
+            }
+            let bytes = await offload { FileSizes.measure(path).privateBytes }
             do {
                 var landed: NSURL?
                 try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &landed)
@@ -180,9 +280,14 @@ public struct CleanupExecutor: Sendable {
             }
         }
         let measured = moved.map(\.bytes).reduce(0, +)
-        let outcome: StepOutcome = problems.isEmpty ? .done(measured: measured)
-            : moved.isEmpty ? .failed(error: problems.joined(separator: " ")) : .partial(measured: measured, problems: problems)
-        return .init(step: step, outcome: outcome, trashed: moved)
+        let outcome: StepOutcome = if !problems.isEmpty {
+            moved.isEmpty ? .failed(error: problems.joined(separator: " ")) : .partial(measured: measured, problems: problems)
+        } else if moved.isEmpty {
+            .skipped(reason: "Nothing on the approved list was still as you reviewed it.")
+        } else {
+            .done(measured: measured)
+        }
+        return .init(step: step, outcome: outcome, trashed: moved, leftAlone: leftAlone)
     }
 
     /// Permanently deletes entries a run put in the Trash. Each must still be inside the
@@ -214,13 +319,16 @@ public struct CleanupExecutor: Sendable {
     private func currentTargets(_ step: CleanupStep) async -> Set<String>? {
         switch step.item.kind {
         case .dockerBuildCache:
-            guard let args = Self.command(of: step.item)?.arguments, let i = args.firstIndex(of: "--builder"), args.indices.contains(i + 1),
-                  let out = try? await tools.run("docker", Array(args.prefix(2)) + ["buildx", "du", "--builder", args[i + 1], "--verbose"], timeout: .seconds(120)),
+            guard let context = Self.dockerContext(step.item), let args = Self.command(of: step.item)?.arguments,
+                  let i = args.firstIndex(of: "--builder"), args.indices.contains(i + 1),
+                  let out = try? await tools.run("docker", context + ["buildx", "du", "--builder", args[i + 1], "--verbose"], timeout: .seconds(120)),
                   out.succeeded else { return nil }
             return Set(Parse.buildxRecords(out.stdout).filter(\.reclaimable).map(\.id))
         case .homebrewOldVersions:
             guard let out = try? await tools.run("brew", ["cleanup", "-n"], timeout: .seconds(300)), out.succeeded else { return nil }
-            return Set(Parse.brewCleanup(out.stdout).targets.map { $0.id.hasPrefix(home) ? "~" + $0.id.dropFirst(home.count) : $0.id })
+            let listing = Parse.brewCleanup(out.stdout)
+            guard listing.unrecognized.isEmpty else { return nil }   // it would do more than the list shows
+            return Set(listing.targets.map { $0.id.hasPrefix(home) ? "~" + $0.id.dropFirst(home.count) : $0.id })
         default:
             return nil
         }
@@ -237,6 +345,24 @@ public struct CleanupExecutor: Sendable {
         default: nil
         }
         guard let query, let out = try? await tools.run(query.0, query.1), out.succeeded else { return nil }
-        return out.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return out.stdout.split(separator: "\n").first.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+}
+
+/// Finds a running app that a cache belongs to. A cache folder is named after the app's
+/// bundle ID ("com.example.App") or after the app or its vendor ("Google", "JetBrains").
+public enum RunningApps {
+    /// The name of a running app the cache `key` belongs to, if any.
+    public static func matching(_ key: String) -> String? {
+        let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular || $0.activationPolicy == .accessory }
+        return apps.first { matches(key, bundleID: $0.bundleIdentifier, name: $0.localizedName) }.map { $0.localizedName ?? key }
+    }
+
+    static func matches(_ key: String, bundleID: String?, name: String?) -> Bool {
+        let key = key.lowercased()
+        guard let bundleID = bundleID?.lowercased() else { return false }
+        if key.contains(".") { return bundleID == key || bundleID.hasPrefix(key + ".") }
+        // A plain folder name: the app's name, or one component of its bundle ID.
+        return name?.lowercased() == key || bundleID.split(separator: ".").contains { $0 == key }
     }
 }

@@ -111,6 +111,19 @@ final class AccountingTests: XCTestCase {
         XCTAssertEqual(ScanSummary(s).owners[s.owners[0].id], s.owners[0].onDisk * 2)
     }
 
+    func testDiskSegmentsAddUpToTheDisk() {
+        let s = Demo.snapshot()
+        let segments = Accounting(s).diskSegments
+        XCTAssertEqual(segments.map(\.bytes).reduce(0, +), s.disk.total)
+        XCTAssertGreaterThan(segments.first { $0.id == "other" }!.bytes, 0, "space outside the Data volume is shown, not dropped")
+    }
+
+    func testOnHostLeavesOutDockersDisk() {
+        var r = Reclaimable()
+        r.byDestination = [.mac: 1, .trash: 2, .containerDisk: 4]
+        XCTAssertEqual(r.onHost, 3)
+    }
+
     func testUnattributedExcludesOwnVolumes() {
         let onData = snapshot.owners.filter { !$0.isOwnVolume }.map(\.onDisk).reduce(0, +)
         XCTAssertEqual(snapshot.unattributed, snapshot.disk.dataVolumeUsed - onData)
@@ -189,7 +202,41 @@ final class RunRecordTests: XCTestCase {
         run.steps[index(run, "go/goBuildCache")].outcome = .partial(measured: 5, problems: ["batch 2 of 3: path is alive"])
         XCTAssertTrue(Receipt.text(run).contains("PARTLY DONE · Go · Build cache"))
         XCTAssertTrue(Receipt.text(run).contains("Problem: batch 2 of 3: path is alive"))
-        XCTAssertTrue(Receipt.text(run).contains("Executed:\n    go clean -cache"))
+        XCTAssertTrue(Receipt.text(run).contains("Commands run:\n    go clean -cache"))
+    }
+
+    func testLeftAloneTargetsAreListedAndDontCountAsPlanned() {
+        var run = makeRun()
+        let i = index(run, "downloads/downloads")
+        run.steps[i] = .init(step: run.steps[i].step, outcome: .skipped(reason: "Nothing on the approved list was still as you reviewed it."),
+                             leftAlone: ["~/Downloads/Docker.dmg: replaced or changed since the scan."])
+        let text = Receipt.text(run)
+        XCTAssertTrue(text.contains("Left alone:\n    ~/Downloads/Docker.dmg: replaced or changed since the scan."))
+        XCTAssertFalse(text.contains("Planned, not executed:\n    ~/Downloads/Docker.dmg"))
+    }
+
+    func testAFailedCommandIsListedAsRun() {
+        var run = makeRun()
+        let i = index(run, "go/goBuildCache")
+        run.steps[i] = .init(step: run.steps[i].step, outcome: .failed(error: "boom"), executed: ["go clean -cache   [failed: boom]"])
+        XCTAssertTrue(Receipt.text(run).contains("FAILED · Go · Build cache · boom\n  Commands run:\n    go clean -cache   [failed: boom]"))
+    }
+
+    func testCleanupStateSeparatesDonePartialAndPicks() {
+        var run = makeRun()
+        let picked = index(run, "downloads/downloads")
+        run.steps[picked] = .init(step: run.steps[picked].step, outcome: .done(measured: 1),
+                                  trashed: [TrashEntry(original: "~/Downloads/Docker.dmg", landed: "/t/Docker.dmg", identity: nil, bytes: 1, picked: true)])
+        var partial = run.steps[index(run, "go/goBuildCache")]
+        partial.step.item.id = "go/other"
+        partial.outcome = .partial(measured: 1, problems: ["x"])
+        run.steps.append(partial)
+        let state = CleanupState(runs: [run], after: run.started.addingTimeInterval(-1))
+        XCTAssertEqual(state.cleaned.keys.sorted(), ["go/goBuildCache"])
+        XCTAssertEqual(state.partlyCleaned.keys.sorted(), ["go/other"], "a partial step isn't marked cleaned")
+        XCTAssertEqual(state.removedPicks["downloads/downloads"], ["~/Downloads/Docker.dmg"])
+        XCTAssertTrue(CleanupState(runs: [run], after: run.started).cleaned.isEmpty, "runs before the snapshot don't count")
+        XCTAssertEqual(run.progressText, "2 of 4 steps done, 1 partly done")
     }
 
     func testTrashDeletionIsItsOwnEventAndOnlyCountsDeletedEntries() {
@@ -256,6 +303,16 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(r.targets.map(\.id).first, "/opt/homebrew/Library/Homebrew/vendor/portable-ruby/3.3.4_1")
         XCTAssertEqual(r.targets.first?.bytes, 33_600_000)
         XCTAssertEqual(r.total, 240_500_000)
+        XCTAssertTrue(r.unrecognized.isEmpty)
+    }
+
+    func testBrewDryRunThatAnnouncesMoreThanRemovalsIsIncomplete() {
+        let r = Parse.brewCleanup("Would remove: /opt/homebrew/Cellar/a/1 (3 files, 1MB)\nWould prune 2 symbolic links from /opt/homebrew\n==> Would autoremove 1 unneeded formula:\nlibfoo")
+        XCTAssertEqual(r.targets.count, 1)
+        XCTAssertEqual(r.unrecognized.count, 3)
+        var fact = Fact(.homebrewOldVersions, onDisk: .bytes(1), targets: r.targets)
+        fact.targetsComplete = false
+        guard case .userRunsCommand = Rules.item(fact).action else { return XCTFail("an incomplete re-checked list is handed to the user") }
     }
 
     func testBuildxRecordsKeepInUseRecordsApart() throws {

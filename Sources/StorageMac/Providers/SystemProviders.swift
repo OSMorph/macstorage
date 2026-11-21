@@ -32,8 +32,10 @@ public struct SystemProvider: Provider {
         var owners = [Owner(id: "macos", name: "macOS", kind: .system, location: "System, Preboot, VM and Update volumes", isOwnVolume: true, items: facts.map(Rules.item))]
         let clt = "/Library/Developer/CommandLineTools"
         if ctx.exists(clt) {
+            let options = ctx.walk()
+            let size = await offload { FileSizes.measure(clt, options) }
             owners.append(Owner(id: "clt", name: "Command Line Tools", kind: .system, location: clt,
-                                items: [Rules.item(Fact(.commandLineTools, onDisk: FileSizes.measure(clt, ctx.walk()).onDisk, path: clt))]))
+                                items: [Rules.item(Fact(.commandLineTools, onDisk: size.onDisk, path: clt))]))
         }
         return ProviderResult(owners: owners, coverage: [CoverageEntry(area: area, status: .measured, detail: "Disk capacity, purgeable space and macOS volumes.")])
     }
@@ -48,33 +50,51 @@ public struct XcodeProvider: Provider {
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
         let dev = ctx.expand("~/Library/Developer/Xcode")
         guard ctx.exists(dev) else { return ProviderResult(coverage: [CoverageEntry(area: area, status: .skipped, detail: "Xcode hasn't been used on this Mac.")]) }
-        func entries(_ sub: String) -> [Target] {
-            FileSizes.children(of: dev + "/" + sub, ctx.walk()).map { name, size in
-                let path = dev + "/" + sub + "/" + name
-                return Target(path, bytes: size.privateBytes, identity: FileSizes.identity(path))
+        let options = ctx.walk()
+        typealias Entry = (target: Target, size: FolderSize)
+        func entries(_ sub: String) async -> [Entry] {
+            await offload {
+                FileSizes.children(of: dev + "/" + sub, options).map { name, size in
+                    let path = dev + "/" + sub + "/" + name
+                    return (Target(path, bytes: size.privateBytes, identity: FileSizes.identity(path)), size)
+                }
             }
         }
-        func fact(_ kind: ItemKind, _ targets: [Target], _ sub: String) -> Fact? {
-            targets.isEmpty ? nil : Fact(kind, onDisk: .bytes(targets.compactMap(\.bytes).reduce(0, +)), targets: targets, path: dev + "/" + sub)
+        func fact(_ kind: ItemKind, _ entries: [Entry], _ sub: String) -> Fact? {
+            guard !entries.isEmpty else { return nil }
+            let size = FolderSize.total(entries.map(\.size))
+            var fact = Fact(kind, onDisk: size.onDisk, sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
+                            targets: entries.map(\.target), path: dev + "/" + sub)
+            fact.targetsComplete = size.isComplete
+            return fact
         }
         // Keep device support for the newest OS version of each platform; older ones are stale.
-        let support = ["iOS DeviceSupport", "watchOS DeviceSupport", "tvOS DeviceSupport"].flatMap { sub in
-            entries(sub).sorted { $0.id.localizedStandardCompare($1.id) == .orderedDescending }.dropFirst()
+        var support: [Entry] = []
+        for sub in ["iOS DeviceSupport", "watchOS DeviceSupport", "tvOS DeviceSupport"] {
+            support += await entries(sub).sorted { Self.osVersion($0.target.id).compare(Self.osVersion($1.target.id), options: .numeric) == .orderedDescending }.dropFirst()
         }
-        var facts = [fact(.xcodeDerivedData, entries("DerivedData"), "DerivedData"), fact(.xcodeArchives, entries("Archives"), "Archives"),
-                     fact(.xcodeDeviceSupport, Array(support), "")].compactMap { $0 }
+        var facts = [fact(.xcodeDerivedData, await entries("DerivedData"), "DerivedData"), fact(.xcodeArchives, await entries("Archives"), "Archives"),
+                     fact(.xcodeDeviceSupport, support, "")].compactMap { $0 }
         if let json = await ctx.output("xcrun", ["simctl", "list", "devices", "unavailable", "-j"]),
            let data = json.data(using: .utf8),
            let decoded = try? JSONDecoder().decode(SimctlDevices.self, from: data) {
             let udids = decoded.devices.values.flatMap { $0 }.map(\.udid)
             if !udids.isEmpty {
                 let root = ctx.expand("~/Library/Developer/CoreSimulator/Devices")
-                let targets = udids.map { Target($0, bytes: FileSizes.measure(root + "/" + $0, ctx.walk()).privateBytes) }
-                facts.append(Fact(.simulatorsUnavailable, onDisk: .bytes(targets.compactMap(\.bytes).reduce(0, +)), targets: targets, path: root))
+                let sizes = await offload { udids.map { FileSizes.measure(root + "/" + $0, options) } }
+                let total = FolderSize.total(sizes)
+                facts.append(Fact(.simulatorsUnavailable, onDisk: total.onDisk, reclaimable: total.reclaimable,
+                                  targets: zip(udids, sizes).map { Target($0, bytes: $1.privateBytes) }, path: root))
             }
         }
         return ProviderResult(owners: facts.isEmpty ? [] : [Owner(id: "xcode", name: "Xcode", kind: .developerTools, location: ctx.display(dev), items: facts.map(Rules.item))],
                               coverage: [CoverageEntry(area: area, status: .measured, detail: "DerivedData, Archives, device support and simulators.")])
+    }
+
+    /// The OS version in a device support folder's name ("iPhone15,2 17.2 (21C62)" → "17.2").
+    static func osVersion(_ path: String) -> String {
+        let name = (path as NSString).lastPathComponent
+        return name.split(separator: " ").first { $0.contains(".") && $0.allSatisfy { $0.isNumber || $0 == "." } }.map(String.init) ?? name
     }
 
     struct SimctlDevices: Decodable {
@@ -101,7 +121,7 @@ public struct LibraryProvider: Provider {
                 var fact = Fact(kind, key: "\((folder as NSString).lastPathComponent)/\(name)", onDisk: size.onDisk,
                                 sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
                                 targets: kind == .appCache ? [Target(path, bytes: size.privateBytes, identity: FileSizes.identity(path))] : [], path: path)
-                fact.appBundleID = key.contains(".") ? key : nil
+                fact.appBundleID = kind == .appCache ? key : nil   // matched against running apps before trashing
                 byApp[key, default: []].append(fact)
             }
         }
@@ -109,8 +129,8 @@ public struct LibraryProvider: Provider {
         await collect("~/Library/Application Support", .appData)
         await collect("~/Library/Containers", .appData)
         await collect("~/Library/Group Containers", .appData)
-        // Developer tools have their own providers.
-        let toolKeys: Set<String> = ["go-build", "pip", "pypoetry", "Homebrew", "com.docker.docker", "group.com.docker", "pnpm", "uv"]
+        // Developer tools have their own providers (keys as `appKey` returns them).
+        let toolKeys: Set<String> = ["go-build", "pip", "pypoetry", "Homebrew", "com.docker.docker", "com.docker", "dev.orbstack", "pnpm", "uv"]
         let owners = byApp.filter { !toolKeys.contains($0.key) }.map { key, facts in
             Owner(id: "app:" + key, name: Self.appName(key), kind: .apps, location: facts.compactMap(\.path).map(ctx.display).joined(separator: ", "), items: facts.map(Rules.item))
         }
@@ -118,9 +138,9 @@ public struct LibraryProvider: Provider {
         let logs = ctx.expand("~/Library/Logs"), options = ctx.walk()
         let logFolders = await offload { FileSizes.children(of: logs, options) }
         let logTargets = logFolders.map { Target(logs + "/" + $0.name, bytes: $0.size.privateBytes, identity: FileSizes.identity(logs + "/" + $0.name)) }
-        let logBytes = logFolders.map { $0.size.allocated }.reduce(0, +)
-        var logFact = Fact(.appLogs, onDisk: .bytes(logBytes), reclaimable: .bytes(logFolders.map { $0.size.privateBytes }.reduce(0, +)), targets: logTargets, path: logs)
-        logFact.targetsComplete = logFolders.allSatisfy { $0.size.isComplete }
+        let logSize = FolderSize.total(logFolders.map(\.size)), logBytes = logSize.allocated
+        var logFact = Fact(.appLogs, onDisk: logSize.onDisk, reclaimable: logSize.reclaimable, targets: logTargets, path: logs)
+        logFact.targetsComplete = logSize.isComplete
         let logOwner = Owner(id: "logs", name: "Logs", kind: .system, location: "~/Library/Logs", items: [Rules.item(logFact)])
         return ProviderResult(owners: owners + (logBytes > 0 ? [logOwner] : []),
                               coverage: [CoverageEntry(area: area, status: .measured, detail: "Caches, app data\(ctx.fullDiskAccess ? ", containers" : "") and logs in ~/Library.")])
@@ -129,7 +149,7 @@ public struct LibraryProvider: Provider {
     /// Folders of one app share a key: "com.tinyspeck.slackmacgap", "TEAMID.com.example.app" → bundle ID.
     static func appKey(_ folder: String) -> String {
         let parts = folder.split(separator: ".")
-        if parts.count > 3, parts[0].count == 10, parts[0].uppercased() == parts[0] { return parts.dropFirst().joined(separator: ".") }
+        if parts.count >= 3, parts[0].count == 10, parts[0].uppercased() == parts[0] { return parts.dropFirst().joined(separator: ".") }
         return folder.hasPrefix("group.") ? String(folder.dropFirst(6)) : folder
     }
 
@@ -152,15 +172,17 @@ public struct PersonalFilesProvider: Provider {
         }
         let downloads = ctx.expand("~/Downloads"), documents = ctx.expand("~/Documents")
         let oldEnough = Date().addingTimeInterval(-90 * 86_400)
+        let options = ctx.walk(), noGit = ctx.walk(skipGitCheckouts: true)
+        let (children, documentsSize) = await offload { (FileSizes.children(of: downloads, options), FileSizes.measure(documents, noGit)) }
         // The pickable list: the largest entries not touched for 90 days.
-        let candidates = FileSizes.children(of: downloads, ctx.walk()).filter { name, _ in
+        let candidates = children.filter { name, _ in
             let date = (try? FileManager.default.attributesOfItem(atPath: downloads + "/" + name))?[.modificationDate] as? Date
             return (date ?? .distantPast) < oldEnough
         }.prefix(50).map { Target(downloads + "/" + $0.name, bytes: $0.size.privateBytes, identity: FileSizes.identity(downloads + "/" + $0.name)) }
         let facts = [
-            Fact(.downloads, onDisk: FileSizes.measure(downloads, ctx.walk()).onDisk, targets: Array(candidates), path: downloads),
+            Fact(.downloads, onDisk: FolderSize.total(children.map(\.size)).onDisk, targets: Array(candidates), path: downloads),
             // Git checkouts inside Documents belong to the Git owner; don't count them twice.
-            Fact(.documents, onDisk: FileSizes.measure(documents, ctx.walk(skipGitCheckouts: true)).onDisk, path: documents),
+            Fact(.documents, onDisk: documentsSize.onDisk, path: documents),
         ]
         return ProviderResult(owners: [
             Owner(id: "downloads", name: "Downloads", kind: .personalFiles, location: "~/Downloads", items: [Rules.item(facts[0])]),

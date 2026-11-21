@@ -19,7 +19,9 @@ struct RootView: View {
             VStack(spacing: 0) {
                 StatusStrips(model: model)
                 Group {
-                    if model.snapshot == nil {
+                    if model.loading {
+                        ProgressView("Loading the last scan…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if model.snapshot == nil {
                         WelcomeView(model: model)
                     } else {
                         switch model.section {
@@ -44,7 +46,7 @@ struct RootView: View {
                     } else {
                         Button(model.snapshot == nil ? "Scan this Mac" : "Scan again", action: model.scan)
                             .buttonStyle(.borderedProminent)
-                            .disabled(model.demo)
+                            .disabled(model.demo || model.sheet != nil)
                             .help(model.demo ? "Demo mode shows sample data." : "Measure everything again.")
                     }
                 }
@@ -59,24 +61,55 @@ struct RootView: View {
 
     private var statusText: String {
         if let p = model.scanning {
-            return "Scanning \(p.running.first ?? "…") (\(p.finished.count + 1) of \(p.total))"
+            return "Scanning \(p.running.first ?? "…") (\(min(p.finished.count + 1, p.total)) of \(p.total))"
         }
         guard let s = model.snapshot else { return "No scan yet" }
+        if s.isPartial { return "Partial scan, stopped" }
         let when = s.date.formatted(date: .abbreviated, time: .shortened)
         return model.demo ? "Demo data" : "Last scan \(when) · took \(Duration.seconds(s.scanDuration).formatted(.units(allowed: [.minutes, .seconds], width: .abbreviated)))"
     }
 }
 
-/// Notices above the content: scanning, sizes from before a cleanup, missing Full Disk Access.
+/// Notices above the content: scanning, partial results, unsaved records, sizes from
+/// before a cleanup, missing Full Disk Access.
 struct StatusStrips: View {
     let model: AppModel
 
     var body: some View {
         VStack(spacing: 0) {
-            if model.scanning != nil {
-                strip("You're looking at the previous scan. These numbers refresh when the new scan finishes.", .blue)
+            if let p = model.scanning {
+                if model.snapshot == nil || model.snapshot?.isPartial == true {
+                    strip("First scan in progress: results appear as each area finishes (\(p.finished.count) of \(p.total) done). Stopping keeps what's finished.", .blue)
+                } else {
+                    strip("You're looking at the previous scan. These numbers refresh when the new scan finishes.", .blue)
+                }
+            } else if let s = model.snapshot, s.isPartial {
+                HStack {
+                    Label("Scan stopped before \(s.unfinishedAreas.joined(separator: ", ")) finished. These totals are partial and weren't saved.", systemImage: "pause.circle")
+                    Spacer()
+                    Button("Scan again", action: model.scan).disabled(model.demo)
+                }
+                .padding(8).background(.blue.opacity(0.1))
             }
-            if !model.cleaned.isEmpty {
+            if let error = model.scanSaveError {
+                HStack {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                    Spacer()
+                    Button("Try again", action: model.retrySaveScan)
+                }
+                .padding(8).background(.yellow.opacity(0.15))
+            }
+            if !model.unsavedRuns.isEmpty, model.sheet == nil {
+                HStack {
+                    Label("\(plural(model.unsavedRuns.count, "cleanup record")) couldn't be saved. \(model.unsavedRuns.first?.value ?? "")", systemImage: "exclamationmark.triangle.fill")
+                    Spacer()
+                    Button("Try again") {
+                        Task { for run in model.history.runs where model.unsavedRuns[run.id] != nil { await model.persist(run) } }
+                    }
+                }
+                .padding(8).background(.yellow.opacity(0.15))
+            }
+            if !model.cleaned.isEmpty || !model.cleanupState.partlyCleaned.isEmpty {
                 strip("Sizes are from the scan before today's cleanup. Completed steps have left Cleanup; By owner keeps their scan-time sizes, marked “Cleaned today”. Scan again to re-measure.", .blue)
             }
             if !model.fullDiskAccess, !model.demo {

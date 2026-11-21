@@ -27,6 +27,12 @@ public struct Snapshot: Codable, Equatable, Sendable {
     }
 
     public func owner(_ id: String) -> Owner? { owners.first { $0.id == id } }
+
+    /// True for a scan that was stopped or is still running: some areas weren't measured.
+    public var isPartial: Bool { coverage.contains { $0.status == .stopped } }
+
+    /// Areas the scan didn't finish.
+    public var unfinishedAreas: [String] { coverage.filter { $0.status == .stopped }.map(\.area) }
 }
 
 public struct DiskUsage: Codable, Equatable, Sendable {
@@ -49,7 +55,13 @@ public struct DiskUsage: Codable, Equatable, Sendable {
 
 /// One line of the Scan coverage view: what was measured, skipped or denied, and why.
 public struct CoverageEntry: Codable, Equatable, Identifiable, Sendable {
-    public enum Status: String, Codable, Sendable { case measured, skipped, noAccess, notMeasured }
+    public enum Status: String, Codable, Sendable {
+        case measured, skipped, noAccess, notMeasured
+        /// The scan was stopped (or is still running) before this area finished.
+        case stopped
+        /// The tool is installed but its listing failed, so nothing was measured.
+        case failed
+    }
 
     public var area: String
     public var status: Status

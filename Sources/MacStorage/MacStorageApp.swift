@@ -32,6 +32,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let folder = options.snapshots else { return }
         Task { await SnapshotTour(model: Self.model, folder: folder).run() }
     }
+
+    /// Full Disk Access may have been turned on in System Settings meanwhile.
+    func applicationDidBecomeActive(_ notification: Notification) { Self.model.refreshAccess() }
+
+    /// Quitting during a cleanup lets the current step finish and the run be recorded first.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let model = Self.model
+        guard model.isRunning else { return .terminateNow }
+        model.onRunFinished = { NSApp.reply(toApplicationShouldTerminate: true) }
+        model.stopRun()
+        return .terminateLater
+    }
 }
 
 @main
@@ -46,7 +58,7 @@ struct MacStorageApp: App {
         .defaultSize(width: 1280, height: 860)
         .commands {
             CommandGroup(after: .newItem) {
-                Button("Scan Again") { model.scan() }.keyboardShortcut("r").disabled(model.scanning != nil || model.demo)
+                Button("Scan Again") { model.scan() }.keyboardShortcut("r").disabled(model.scanning != nil || model.demo || model.sheet != nil)
             }
         }
     }
@@ -68,6 +80,10 @@ struct SnapshotTour {
         defer { watchdog.cancel() }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let window = await mainWindow()
+        // Key and active, so the sidebar and controls render as they do in use.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
         Self.log("capturing a \(Int(window.frame.width))×\(Int(window.frame.height)) window")
 
         for section in AppSection.allCases {
@@ -98,6 +114,14 @@ struct SnapshotTour {
         model.show(owner: "go", item: "go/goModuleCache")
         await shot("owners-cleaned-item", window)
         let saved = model.snapshot
+        if var partial = saved {
+            partial.coverage.append(CoverageEntry(area: "Git checkouts", status: .stopped, detail: "Not finished: the scan was stopped."))
+            model.setSnapshot(partial)
+            model.section = .overview
+            await shot("overview-partial-scan", window)
+            model.section = .coverage
+            await shot("coverage-partial-scan", window)
+        }
         model.setSnapshot(nil)
         await shot("welcome", window)
         model.setSnapshot(saved)

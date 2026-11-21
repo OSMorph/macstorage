@@ -22,7 +22,7 @@ struct OverviewView: View {
                     }
                     Text("Biggest owners").font(.headline)
                     OwnerRanking(model: model, snapshot: s, accounting: acc)
-                    Text("In each bar, the solid part is reclaimable (safe and probably-safe items) and the faded part is the rest. On disk counts blocks shared between copies (APFS clones, hard links) once.")
+                    Text("In each bar, the solid part is what cleaning up gives back on your Mac (safe and probably-safe items, right away or via the Trash) and the faded part is the rest. Space freed inside Docker's disk isn't drawn: the disk file shrinks later. On disk counts hard links once; blocks shared between APFS clones count in each copy, and the shared part is noted per item.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(20)
@@ -48,10 +48,11 @@ struct DiskBar: View {
     let accounting: Accounting
 
     var body: some View {
-        let byKind = accounting.onDiskByKind
-        let segments: [(String, Int64, Color)] = OwnerKind.allCases.map { ($0.label, byKind[$0, default: 0], $0.color) }
-            + [("Not attributed yet", snapshot.unattributed, .secondary.opacity(0.35)), ("Free", snapshot.disk.free, .clear)]
-        let total = Double(segments.map(\.1).reduce(0, +))
+        // Scaled to the disk's capacity; the segments add up to it.
+        let segments: [(String, Int64, Color)] = accounting.diskSegments.filter { $0.bytes > 0 || $0.kind != nil }.map { s in
+            (s.label, s.bytes, s.kind?.color ?? (s.id == "free" ? .clear : s.id == "other" ? .secondary.opacity(0.2) : .secondary.opacity(0.4)))
+        }
+        let total = Double(max(snapshot.disk.total, segments.map(\.1).reduce(0, +)))
         VStack(alignment: .leading, spacing: 8) {
             GeometryReader { geo in
                 HStack(spacing: 2) {
@@ -66,7 +67,8 @@ struct DiskBar: View {
             .frame(height: 28)
             .accessibilityElement()
             .accessibilityLabel("Disk usage: " + segments.map { "\($0.0) \(formatBytes($0.1))" }.joined(separator: ", "))
-            HStack(spacing: 14) {
+            // Wraps at narrow widths instead of clipping.
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), alignment: .leading)], alignment: .leading, spacing: 6) {
                 ForEach(segments, id: \.0) { name, value, color in
                     HStack(spacing: 5) {
                         RoundedRectangle(cornerRadius: 2).fill(color).overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(.quaternary)).frame(width: 10, height: 10)
@@ -115,9 +117,13 @@ struct TierTile: View {
         let r = accounting.reclaimable(tier: tier)
         let userRun = accounting.userRunItems(tier: tier).count
         let unmeasured = accounting.unmeasuredCount(tier: tier)
-        Tile(title: { TierBadge(tier: tier) }, value: formatBytes(r[.mac]), unit: "right away",
-             secondary: "+ \(formatBytes(r[.trash])) after emptying the Trash",
-             note: "+ \(formatBytes(r[.containerDisk])) inside Docker's disk."
+        // Lead with the largest destination; the others follow, never added to it.
+        let order = Destination.allCases.sorted { r[$0] > r[$1] }
+        let phrase: [Destination: String] = [.mac: "right away", .trash: "after emptying the Trash", .containerDisk: "inside Docker's disk"]
+        let bound = { (d: Destination) in formatBytes(r[d], upperBound: r.includesUpperBound) }
+        Tile(title: { TierBadge(tier: tier) }, value: bound(order[0]), unit: phrase[order[0]]!,
+             secondary: "+ \(bound(order[1])) \(phrase[order[1]]!)",
+             note: "+ \(bound(order[2])) \(phrase[order[2]]!)."
                 + (userRun > 0 ? " \(plural(userRun, "item")) you run yourself." : "")
                 + (unmeasured > 0 ? " \(unmeasured) not measured yet." : ""),
              link: action.map { ("Review cleanup", $0) })
@@ -141,7 +147,7 @@ struct OwnerRanking: View {
             TableColumn("Kind") { o in Text(o.kind.label).foregroundStyle(.secondary) }.width(130)
             TableColumn("On disk") { o in Text(formatBytes(o.onDisk)).monospacedDigit() }.width(80)
             TableColumn("") { o in
-                let r = accounting.reclaimable(owner: o).byDestination.values.reduce(0, +)
+                let r = min(o.onDisk, accounting.reclaimable(owner: o).onHost)
                 GeometryReader { g in
                     HStack(spacing: 1) {
                         Rectangle().fill(o.kind.color).frame(width: g.size.width * Double(r) / maxValue)
@@ -151,7 +157,7 @@ struct OwnerRanking: View {
             }
             TableColumn("Reclaimable") { o in ReclaimableText(label: accounting.reclaimableLabel(owner: o)) }.width(170)
         }
-        .frame(height: CGFloat(top.count) * 28 + 32)
+        .frame(height: CGFloat(top.count) * 24 + 30)
         .contextMenu(forSelectionType: Owner.ID.self) { _ in } primaryAction: { ids in
             if let id = ids.first { model.show(owner: id) }
         }

@@ -11,6 +11,10 @@ public struct Reclaimable: Equatable, Sendable {
 
     public subscript(_ d: Destination) -> Int64 { byDestination[d, default: 0] }
 
+    /// What comes back on the Mac's own disk (right away or via the Trash). Bars and map
+    /// hatching use this: space freed inside a VM disk doesn't shrink the disk file.
+    public var onHost: Int64 { Destination.allCases.filter(\.isOnHost).map { self[$0] }.reduce(0, +) }
+
     mutating func add(_ item: Item) {
         guard let bytes = item.reclaimable.bytes, let d = item.action.destination else { return }
         byDestination[d, default: 0] += bytes
@@ -73,8 +77,38 @@ public struct Accounting: Sendable {
         snapshot.owners.reduce(into: [:]) { $0[$1.kind, default: 0] += $1.onDisk }
     }
 
+    /// The disk bar: owners by kind, then what no owner accounts for, then free space.
+    /// Together they add up to the disk's capacity (unless owners overlap, which the
+    /// accounting avoids).
+    public var diskSegments: [DiskSegment] {
+        let byKind = onDiskByKind
+        var segments = OwnerKind.allCases.map { DiskSegment(id: $0.rawValue, label: $0.label, kind: $0, bytes: byKind[$0, default: 0]) }
+        segments.append(DiskSegment(id: "unattributed", label: "Not attributed yet", bytes: snapshot.unattributed))
+        // Space used outside the Data volume that no owner accounts for: local snapshots,
+        // Recovery, other volumes.
+        let accounted = segments.map(\.bytes).reduce(0, +)
+        segments.append(DiskSegment(id: "other", label: "Snapshots and other volumes", bytes: max(0, snapshot.disk.used - accounted)))
+        segments.append(DiskSegment(id: "free", label: "Free", bytes: snapshot.disk.free))
+        return segments
+    }
+
     private var allItems: [Item] { snapshot.owners.flatMap(\.items) }
     private var automaticItems: [Item] { allItems.filter { $0.isAutomaticCleanup && !cleaned.contains($0.id) } }
+}
+
+public struct DiskSegment: Identifiable, Equatable, Sendable {
+    public var id: String
+    public var label: String
+    /// The owner kind it stands for, or nil for unattributed, other and free space.
+    public var kind: OwnerKind?
+    public var bytes: Int64
+
+    public init(id: String, label: String, kind: OwnerKind? = nil, bytes: Int64) {
+        self.id = id
+        self.label = label
+        self.kind = kind
+        self.bytes = bytes
+    }
 }
 
 public enum ReclaimableLabel: Equatable, Sendable {

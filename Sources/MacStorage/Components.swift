@@ -35,18 +35,36 @@ extension Tier {
     }
 }
 
-/// A tier is always shown with its icon and its name, never by color alone.
+/// A tier is always shown with its icon and its name, never by color alone. The tint is
+/// on the icon; the text stays at full contrast.
 struct TierBadge: View {
     let tier: Tier
 
     var body: some View {
-        Label(tier.label, systemImage: tier.symbol)
+        Label { Text(tier.label).foregroundStyle(.primary) } icon: { Image(systemName: tier.symbol).foregroundStyle(tier.tint) }
             .font(.caption)
-            .foregroundStyle(tier.tint)
             .padding(.horizontal, 6).padding(.vertical, 1)
             .overlay(Capsule().strokeBorder(.quaternary))
     }
 }
+
+extension Color {
+    /// Warning text that stays readable on light backgrounds (orange alone is about 2.5:1).
+    static let warningText = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .systemOrange : NSColor(srgbRed: 0.62, green: 0.29, blue: 0, alpha: 1)
+    })
+    /// Error text, same reasoning.
+    static let errorText = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .systemRed : NSColor(srgbRed: 0.70, green: 0.10, blue: 0.10, alpha: 1)
+    })
+    /// Success text, same reasoning.
+    static let successText = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .systemGreen : NSColor(srgbRed: 0.10, green: 0.45, blue: 0.18, alpha: 1)
+    })
+}
+
+/// "≤ 7.5 GB" for an upper bound, "7.5 GB" otherwise.
+func formatBytes(_ b: Int64, upperBound: Bool) -> String { (upperBound && b > 0 ? "≤ " : "") + formatBytes(b) }
 
 func formatBytes(_ b: Int64) -> String { ByteFormat.string(b) }
 
@@ -126,14 +144,24 @@ struct Treemap: View {
             let cells = Self.layout(Self.fold(nodes, area: geo.size.width * geo.size.height), in: CGRect(origin: .zero, size: geo.size))
             ZStack(alignment: .topLeading) {
                 ForEach(cells, id: \.node.id) { cell in
-                    Button { if cell.node.id != Self.smallerID { onSelect(cell.node.id) } } label: {
-                        CellView(node: cell.node, size: cell.rect.size, isSelected: cell.node.id == selected)
+                    Group {
+                        if cell.node.id == Self.smallerID {
+                            // Not a control: the small entries are in the table below.
+                            CellView(node: cell.node, size: cell.rect.size, isSelected: false)
+                                .help("\(cell.node.label): each is listed in the table below.")
+                                .accessibilityLabel("\(cell.node.label), \(formatBytes(Int64(cell.node.value))) together, listed in the table below")
+                        } else {
+                            Button { onSelect(cell.node.id) } label: {
+                                CellView(node: cell.node, size: cell.rect.size, isSelected: cell.node.id == selected)
+                            }
+                            .buttonStyle(.plain)
+                            .help("\(cell.node.label): \(formatBytes(Int64(cell.node.value)))")
+                            .accessibilityLabel("\(cell.node.label), \(formatBytes(Int64(cell.node.value)))" + (cell.node.reclaimable > 0 ? ", \(formatBytes(Int64(cell.node.reclaimable))) reclaimable on your Mac" : ""))
+                            .accessibilityAddTraits(cell.node.id == selected ? .isSelected : [])
+                        }
                     }
-                    .buttonStyle(.plain)
                     .frame(width: max(0, cell.rect.width - 2), height: max(0, cell.rect.height - 2))
                     .offset(x: cell.rect.minX + 1, y: cell.rect.minY + 1)
-                    .accessibilityLabel("\(cell.node.label), \(formatBytes(Int64(cell.node.value)))" + (cell.node.reclaimable > 0 ? ", \(formatBytes(Int64(cell.node.reclaimable))) reclaimable" : ""))
-                    .accessibilityAddTraits(cell.node.id == selected ? .isSelected : [])
                 }
             }
         }
@@ -243,6 +271,7 @@ struct TargetList: View {
     let unit: String
     @State private var filter = ""
     @State private var showAll = false
+    @State private var exportError: String?
 
     private var matches: [Target] { filter.isEmpty ? targets : targets.filter { $0.id.localizedCaseInsensitiveContains(filter) } }
 
@@ -255,6 +284,7 @@ struct TargetList: View {
                     ForEach(shown, id: \.id) { t in
                         HStack {
                             Text(t.id).font(.system(.caption, design: .monospaced)).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                                .help(t.id)
                             Spacer()
                             if let b = t.bytes { Text(formatBytes(b)).font(.caption).foregroundStyle(.secondary).monospacedDigit() }
                         }
@@ -273,6 +303,11 @@ struct TargetList: View {
         }
         .padding(8)
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
+        .alert("The list couldn't be exported", isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })) {
+            Button("OK") { exportError = nil }
+        } message: {
+            Text(exportError ?? "")
+        }
     }
 
     private func export() {
@@ -280,7 +315,11 @@ struct TargetList: View {
         panel.nameFieldStringValue = "macstorage-\(unit.replacingOccurrences(of: " ", with: "-"))s.txt"
         panel.allowedContentTypes = [.plainText]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? targets.map { [$0.id, $0.bytes.map(formatBytes) ?? ""].joined(separator: "\t") }.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        do {
+            try targets.map { [$0.id, $0.bytes.map(formatBytes) ?? ""].joined(separator: "\t") }.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            exportError = error.localizedDescription
+        }
     }
 }
 

@@ -80,12 +80,15 @@ public enum Parse {
     public struct BrewCleanup: Equatable, Sendable {
         public var targets: [Target]
         public var total: Int64?
+        /// Lines that announce anything other than a listed removal (pruned links,
+        /// autoremoved formulae). When there are any, the list isn't the whole scope.
+        public var unrecognized: [String] = []
     }
 
     /// `brew cleanup -n`: "Would remove: /path (N files, 33.6MB)" lines and a closing
     /// "This operation would free approximately 240.5MB of disk space."
     public static func brewCleanup(_ text: String) -> BrewCleanup {
-        var targets: [Target] = []
+        var targets: [Target] = [], unrecognized: [String] = []
         var total: Int64?
         for line in text.split(whereSeparator: \.isNewline).map(String.init) {
             if line.hasPrefix("Would remove: ") {
@@ -98,8 +101,10 @@ public enum Parse {
                 targets.append(Target(path, bytes: size))
             } else if let r = line.range(of: "free approximately ") {
                 total = dockerSize(line[r.upperBound...].components(separatedBy: " ").first ?? "")
+            } else if !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                unrecognized.append(line)
             }
         }
-        return BrewCleanup(targets: targets, total: total)
+        return BrewCleanup(targets: targets, total: total, unrecognized: unrecognized)
     }
 }

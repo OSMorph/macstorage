@@ -15,7 +15,7 @@ struct OwnersView: View {
                         ItemTable(model: model, owner: owner, accounting: acc)
                     } else {
                         Treemap(nodes: s.owners.map { o in
-                            TreemapNode(id: o.id, label: o.name, value: Double(o.onDisk), reclaimable: Double(acc.reclaimable(owner: o).byDestination.values.reduce(0, +)), color: o.kind.color)
+                            TreemapNode(id: o.id, label: o.name, value: Double(o.onDisk), reclaimable: Double(min(o.onDisk, acc.reclaimable(owner: o).onHost)), color: o.kind.color)
                         }, selected: nil) { model.show(owner: $0) }
                         .frame(height: 300)
                         OwnerTable(model: model, snapshot: s, accounting: acc)
@@ -30,7 +30,9 @@ struct OwnersView: View {
     }
 
     private func node(_ item: Item, _ kind: OwnerKind, _ acc: Accounting) -> TreemapNode {
-        let reclaim = item.tier.isCleanable && !acc.cleaned.contains(item.id) ? Double(item.reclaimable.bytes ?? 0) : 0
+        // Hatched: what cleanup gives back on the Mac, matching the totals (automatic items only).
+        let counts = item.isAutomaticCleanup && item.action.destination?.isOnHost == true && !acc.cleaned.contains(item.id)
+        let reclaim = counts ? Double(item.reclaimable.bytes ?? 0) : 0
         return TreemapNode(id: item.id, label: item.name, value: Double(item.onDisk.bytes ?? 0), reclaimable: reclaim, color: kind.color)
     }
 
@@ -85,6 +87,8 @@ struct ItemTable: View {
             TableColumn("Reclaimable") { i in
                 if accounting.cleaned.contains(i.id) {
                     Text("Cleaned today").foregroundStyle(.secondary)
+                } else if model.cleanupState.partlyCleaned[i.id] != nil {
+                    Text("Partly cleaned today").foregroundStyle(.secondary)
                 } else if i.tier == .leaveAlone || i.tier == .notRemovable {
                     Text("0 bytes").foregroundStyle(.secondary)
                 } else {
@@ -109,9 +113,16 @@ struct Inspector: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if let owner = model.selectedOwnerID.flatMap(snapshot.owner),
-                   let item = owner.items.first(where: { $0.id == model.selectedItemID }) {
-                    details(owner, item)
+                if let owner = model.selectedOwnerID.flatMap(snapshot.owner) {
+                    if let item = owner.items.first(where: { $0.id == model.selectedItemID }) {
+                        details(owner, item)
+                    } else {
+                        Text(owner.name).font(.title3.weight(.semibold))
+                        Text("\(owner.kind.label) · \(formatBytes(owner.onDisk)) on disk · \(plural(owner.items.count, "item"))").foregroundStyle(.secondary)
+                        if let note = owner.note { Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+                        Callout("Pick an item in the map or the list to see its recommendation and the exact command or action.")
+                        Text(owner.location).font(.caption).foregroundStyle(.secondary)
+                    }
                 } else {
                     Text("All owners").font(.title3.weight(.semibold))
                     Text("\(plural(snapshot.owners.count, "owner")) · \(formatBytes(snapshot.owners.map(\.onDisk).reduce(0, +))) attributed").foregroundStyle(.secondary)
@@ -136,6 +147,11 @@ struct Inspector: View {
                 Button("View its receipt") { model.section = .history; model.openRunID = runID }.buttonStyle(.link)
             }
         } else {
+            if let runID = model.cleanupState.partlyCleaned[item.id] {
+                Callout("Partly cleaned today: some of the list was removed before a problem stopped the step. Sizes are from before; scan again for a current list.") {
+                    Button("View its receipt") { model.section = .history; model.openRunID = runID }.buttonStyle(.link)
+                }
+            }
             TierBadge(tier: item.tier)
             HStack(spacing: 8) {
                 SizeBox(value: MeasureText(measure: item.onDisk), caption: item.sharedBytes.map { "on disk (+ \(formatBytes($0)) shared with other files)" } ?? "on disk")
@@ -234,13 +250,14 @@ struct PickerList: View {
     var body: some View {
         let removed = model.removedPicks[item.id] ?? []
         let rows = item.targets.filter { !removed.contains($0.id) }
-        VStack(alignment: .leading, spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(rows, id: \.id) { t in
                 HStack {
-                    Toggle(isOn: binding(t.id)) { Text((t.id as NSString).lastPathComponent) }.toggleStyle(.checkbox)
+                    Toggle(isOn: binding(t.id)) { Text((t.id as NSString).lastPathComponent).lineLimit(1).truncationMode(.middle) }
+                        .toggleStyle(.checkbox).help(t.id)
                     Spacer()
-                    Button("Reveal") { revealInFinder(t.id) }.buttonStyle(.link).font(.caption)
-                    Text(t.bytes.map(formatBytes) ?? "").monospacedDigit().foregroundStyle(.secondary)
+                    Text(t.bytes.map(formatBytes) ?? "").monospacedDigit().foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
+                    Button("Reveal") { revealInFinder(t.id) }.buttonStyle(.link).font(.caption).frame(width: 44, alignment: .trailing)
                 }
                 .padding(.vertical, 4)
                 Divider()

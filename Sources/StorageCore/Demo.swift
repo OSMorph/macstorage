@@ -90,7 +90,7 @@ public enum Demo {
         ]
         return Snapshot(date: scanDate, scanDuration: 386, disk: disk, owners: owners, coverage: coverage, folders: [
             "~": [
-                FolderEntry(name: "Library", bytes: gb(96), kind: .developerTools, owners: [OwnerShare(ownerID: "docker", bytes: gb(50.1)), OwnerShare(ownerID: "slack", bytes: gb(8.3))], hasChildren: true),
+                FolderEntry(name: "Library", bytes: gb(96), kind: .developerTools, owners: [OwnerShare(ownerID: "docker", bytes: gb(50.1)), OwnerShare(ownerID: "slack", bytes: gb(8.3))], isFolder: true),
                 FolderEntry(name: "Downloads", bytes: gb(64), kind: .personalFiles, owners: [OwnerShare(ownerID: "downloads", bytes: gb(64))]),
                 FolderEntry(name: "Developer", bytes: gb(10.7), kind: .developerTools, owners: [OwnerShare(ownerID: "git", bytes: gb(10.7))]),
                 FolderEntry(name: "go", bytes: gb(10.5), kind: .developerTools, owners: [OwnerShare(ownerID: "go", bytes: gb(10.5))]),

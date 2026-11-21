@@ -124,18 +124,19 @@ public struct FolderEntry: Codable, Equatable, Identifiable, Sendable {
     public var isPartial: Bool
     /// Owners holding space in this folder and how much, largest first.
     public var owners: [OwnerShare]
-    public var hasChildren: Bool
+    /// True for a folder, false for a file; nil in scans saved before 0.1.2.
+    public var isFolder: Bool?
 
     public var id: String { name }
 
     public init(name: String, bytes: Int64?, kind: OwnerKind, isPartial: Bool = false,
-                owners: [OwnerShare] = [], hasChildren: Bool = false) {
+                owners: [OwnerShare] = [], isFolder: Bool? = nil) {
         self.name = name
         self.bytes = bytes
         self.kind = kind
         self.isPartial = isPartial
         self.owners = owners
-        self.hasChildren = hasChildren
+        self.isFolder = isFolder
     }
 }
 

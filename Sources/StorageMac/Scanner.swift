@@ -157,31 +157,44 @@ public struct Scanner: Sendable {
     }
 }
 
-/// The By folder view: sizes of the home folder and Library, with which owners hold space in each.
-enum FolderAttribution {
+/// The By folder view: sizes of the entries in a folder, with which owners hold space in
+/// each. The scan measures the home folder and Library; the app measures deeper levels
+/// when they're opened.
+public enum FolderAttribution {
     static func folders(_ ctx: ScanContext, owners: [Owner]) -> [String: [FolderEntry]] {
+        let options = ctx.walk(limit: .seconds(30))
         var result: [String: [FolderEntry]] = [:]
         for (key, path) in [("~", ctx.home), ("~/Library", ctx.home + "/Library")] {
-            let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
-            result[key] = names.compactMap { name -> FolderEntry? in
-                let full = path + "/" + name
-                if ctx.protectedPaths.contains(full) { return FolderEntry(name: name, bytes: nil, kind: .personalFiles) }
-                let size = FileSizes.measure(full, ctx.walk(limit: .seconds(30)))
-                guard size.allocated > 0 else { return nil }
-                let shares = owners.compactMap { o -> OwnerShare? in
-                    let bytes = o.items.filter { Self.isInside($0.path, full) }.compactMap(\.onDisk.bytes).reduce(0, +)
-                    return bytes > 0 ? OwnerShare(ownerID: o.id, bytes: bytes) : nil
-                }.sorted { $0.bytes > $1.bytes }
-                let kind = shares.first.flatMap { s in owners.first { $0.id == s.ownerID }?.kind } ?? .personalFiles
-                return FolderEntry(name: name, bytes: size.allocated, kind: kind, isPartial: !size.isComplete,
-                                   owners: shares, hasChildren: key == "~" && name == "Library")
-            }.sorted { ($0.bytes ?? 0) > ($1.bytes ?? 0) }
+            result[key] = (names(in: path) ?? []).compactMap { entry($0, in: path, owners: owners, options) }
+                .sorted { ($0.bytes ?? 0) > ($1.bytes ?? 0) }
         }
         return result
     }
 
+    /// The names directly inside `path`, or nil when it can't be listed.
+    public static func names(in path: String) -> [String]? {
+        try? FileManager.default.contentsOfDirectory(atPath: path)
+    }
+
+    /// One entry of `path`: its size and the owners holding space in it, or nil when it
+    /// takes no space. An entry in `options.excluding` (a folder macOS protects without Full
+    /// Disk Access) is listed without a size and never opened.
+    public static func entry(_ name: String, in path: String, owners: [Owner], _ options: WalkOptions) -> FolderEntry? {
+        let full = path + "/" + name
+        if options.excluding.contains(full) { return FolderEntry(name: name, bytes: nil, kind: .personalFiles, isFolder: true) }
+        let size = FileSizes.measure(full, options)
+        guard size.allocated > 0 else { return nil }
+        let shares = owners.compactMap { o -> OwnerShare? in
+            let bytes = o.items.filter { isInside($0.path, full) }.compactMap(\.onDisk.bytes).reduce(0, +)
+            return bytes > 0 ? OwnerShare(ownerID: o.id, bytes: bytes) : nil
+        }.sorted { $0.bytes > $1.bytes }
+        let kind = shares.first.flatMap { s in owners.first { $0.id == s.ownerID }?.kind } ?? .personalFiles
+        return FolderEntry(name: name, bytes: size.allocated, kind: kind, isPartial: !size.isComplete,
+                           owners: shares, isFolder: FileSizes.isDirectory(full))
+    }
+
     /// True when `path` is `folder` or inside it, matching whole path components.
-    static func isInside(_ path: String?, _ folder: String) -> Bool {
+    public static func isInside(_ path: String?, _ folder: String) -> Bool {
         guard let path else { return false }
         return path == folder || path.hasPrefix(folder + "/")
     }

@@ -32,6 +32,34 @@ final class FileSizesTests: XCTestCase {
 
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
 
+    func testAFolderLevelListsFoldersAndFilesWithTheirOwners() throws {
+        let fm = FileManager.default
+        let sub = dir.appending(path: "Projects"), protected = dir.appending(path: "Private"), empty = dir.appending(path: "Empty")
+        for d in [sub, protected, empty] { try fm.createDirectory(at: d, withIntermediateDirectories: true) }
+        fm.createFile(atPath: sub.appending(path: "big.bin").path, contents: Data(repeating: 1, count: 1 << 20))
+        fm.createFile(atPath: protected.appending(path: "secret.bin").path, contents: Data(repeating: 2, count: 1 << 20))
+        fm.createFile(atPath: dir.appending(path: "notes.txt").path, contents: Data(repeating: 3, count: 64 << 10))
+        try fm.createSymbolicLink(atPath: dir.appending(path: "link").path, withDestinationPath: sub.path)
+        let item = Rules.item(Fact(.appLogs, onDisk: .bytes(1 << 20), targets: [], path: sub.path))
+        let owners = [Owner(id: "logs", name: "Logs", kind: .system, location: "", items: [item])]
+        let options = WalkOptions(excluding: [protected.path])
+
+        XCTAssertEqual(Set(try XCTUnwrap(FolderAttribution.names(in: dir.path))), ["Projects", "Private", "Empty", "notes.txt", "link"])
+        let folder = try XCTUnwrap(FolderAttribution.entry("Projects", in: dir.path, owners: owners, options))
+        XCTAssertEqual(folder.isFolder, true)
+        XCTAssertGreaterThanOrEqual(folder.bytes ?? 0, 1 << 20)
+        XCTAssertEqual(folder.owners.map(\.ownerID), ["logs"])
+        XCTAssertEqual(folder.kind, .system)
+        let file = try XCTUnwrap(FolderAttribution.entry("notes.txt", in: dir.path, owners: owners, options))
+        XCTAssertEqual(file.isFolder, false, "a file can't be opened")
+        XCTAssertEqual(file.kind, .personalFiles)
+        let guarded = try XCTUnwrap(FolderAttribution.entry("Private", in: dir.path, owners: owners, options))
+        XCTAssertNil(guarded.bytes, "a protected folder is listed without being read")
+        XCTAssertNil(FolderAttribution.entry("Empty", in: dir.path, owners: owners, options), "nothing that takes no space")
+        XCTAssertNil(FolderAttribution.entry("link", in: dir.path, owners: owners, options), "a symlink isn't followed")
+        XCTAssertNil(FolderAttribution.names(in: dir.appending(path: "missing").path))
+    }
+
     func testAClonesPrivateSizeIsZeroUntilItChanges() throws {
         let original = dir.appending(path: "a.bin").path, clone = dir.appending(path: "b.bin").path
         FileManager.default.createFile(atPath: original, contents: Data(repeating: 7, count: 4 << 20))

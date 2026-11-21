@@ -50,8 +50,9 @@ public struct PodmanProvider: Provider {
                 result.coverage.append(coverage)
             }
             guard machine["Running"] == "true" else {
-                diskOnly("Not running; the app never starts a machine to look inside.",
-                         CoverageEntry(area: title, status: .notMeasured, detail: "Machine not running: only its VM disk file was measured."))
+                let state = machine["Starting"] == "true" ? "Starting" : "Not running"
+                diskOnly("\(state); the app never starts a machine or waits for one to look inside.",
+                         CoverageEntry(area: title, status: .notMeasured, detail: "Machine \(state.lowercased()): only its VM disk file was measured."))
                 continue
             }
             // The rootless connection is named after the machine; the rootful one adds
@@ -196,15 +197,16 @@ public struct PodmanProvider: Provider {
             for file in (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
             where ["raw", "img", "qcow2"].contains((file as NSString).pathExtension) && !listed.contains(where: { isDisk(file, of: $0.hasSuffix("*") ? String($0.dropLast()) : $0, others: listed) }) {
                 let path = folder + "/" + file, onMac = FileSizes.measure(path).allocated
-                guard onMac > 0 else { continue }
+                // Machine disks are gigabytes; a small stray image file isn't one.
+                guard onMac >= 100_000_000 else { continue }
                 result.owners.append(Owner(id: "podman:\(type):\(file)", name: "Podman machine disk (\(type))", kind: .developerTools, location: ctx.display(folder),
-                                           note: "A \(type) machine's disk. This Podman lists only the current provider's machines, so the app didn't ask about it.",
+                                           note: "A \(type) machine's disk. Podman didn't list every provider's machines, so the app didn't ask about it.",
                                            hostBytes: onMac, items: [Rules.item(Fact(.podmanVMDisk, onDisk: .bytes(onMac), path: path))]))
             }
         }
         if !result.owners.isEmpty {
             result.coverage.append(CoverageEntry(area: "Podman (other providers)", status: .notMeasured,
-                                                 detail: "Podman before 5.3 lists one provider's machines; \(plural(result.owners.count, "disk file")) of other providers' machines were measured as files."))
+                                                 detail: "Podman didn't list every provider's machines (--all-providers needs 5.3); \(plural(result.owners.count, "disk file")) of other providers' machines were measured as files."))
         }
         return result
     }

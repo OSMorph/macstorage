@@ -36,16 +36,20 @@ public struct DockerProvider: Provider {
                 result.coverage.append(CoverageEntry(area: "Docker context \(name)", status: .skipped, detail: "Reaches Podman; measured under Podman instead."))
                 continue
             }
-            if components == nil, (info.last ?? "").localizedCaseInsensitiveContains("fedora") {
-                result.coverage.append(CoverageEntry(area: "Docker context \(name)", status: .notMeasured,
-                                                     detail: "Its engine runs Fedora and didn't say what it is. If it's Podman's Docker socket, its machine is listed under Podman too, and the two overlap."))
+            let maybePodman = components == nil && (info.last ?? "").localizedCaseInsensitiveContains("fedora")
+            let overlap = "Its engine runs Fedora and didn't say what it is: if it's Podman's Docker socket, its machine is listed under Podman too, and the two overlap."
+            if maybePodman {
+                result.coverage.append(CoverageEntry(area: "Docker context \(name)", status: .failed, detail: overlap))
             }
             let engineName = Self.engineName(info.last ?? "", endpoint: endpoint)
             let disk = Self.vmDisk(engineName, context: name, ctx)
             if let disk { seenDisks.insert(disk) }
             let (owner, coverage) = await engine(ctx, context: name, engineID: engineID, engineName: engineName, disk: disk)
             result.coverage += coverage
-            if let owner { result.owners.append(owner) }
+            if var owner {
+                if maybePodman { owner.note = (owner.note.map { $0 + " " } ?? "") + overlap }
+                result.owners.append(owner)
+            }
         }
         // Engines that aren't running are never started, but their VM disk still takes space.
         for (name, endpoint) in stopped {

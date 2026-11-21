@@ -458,7 +458,9 @@ final class CleanupSafetyTests: XCTestCase {
         for type in ["applehv", "qemu"] { try FileManager.default.createDirectory(at: machine.appending(path: type), withIntermediateDirectories: true) }
         defer { try? FileManager.default.removeItem(at: home) }
         FileManager.default.createFile(atPath: machine.appending(path: "applehv/dev-arm64.raw").path, contents: Data(repeating: 1, count: 1 << 20))
-        FileManager.default.createFile(atPath: machine.appending(path: "qemu/old_fedora-coreos-39.qcow2").path, contents: Data(repeating: 1, count: 1 << 20))
+        // Past the 100 MB a stray image file stays under.
+        FileManager.default.createFile(atPath: machine.appending(path: "qemu/old_fedora-coreos-39.qcow2").path, contents: Data(repeating: 1, count: 110 << 20))
+        FileManager.default.createFile(atPath: machine.appending(path: "qemu/stray.img").path, contents: Data(repeating: 1, count: 1 << 20))
         let tools = FakeTools([
             { $0.contains("--all-providers") ? ToolOutput(status: 125, stdout: "", stderr: "unknown flag") : nil },
             { $0.contains("machine list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","Running":false,"VMType":"applehv"}]"#) : nil },
@@ -578,6 +580,7 @@ final class CleanupSafetyTests: XCTestCase {
         let fedora = await DockerProvider().scan(ScanContext(tools: podmanLike, home: NSTemporaryDirectory(), fullDiskAccess: true))
         XCTAssertEqual(fedora.owners.count, 1, "only a positive answer hands an engine to Podman")
         XCTAssertTrue(fedora.coverage.contains { $0.detail.contains("overlap") }, "the possible overlap is said")
+        XCTAssertTrue(fedora.owners.first?.note?.contains("overlap") == true, "next to its size too")
     }
 
     func testADockerContextThatReachesPodmanIsLeftToPodman() async {

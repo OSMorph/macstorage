@@ -444,6 +444,13 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(new.format, Snapshot.currentFormat)
     }
 
+    func testAFolderEntrySavedBefore012Decodes() throws {
+        let json = #"{"name": "Library", "bytes": 1000, "kind": "apps", "isPartial": false, "owners": [], "hasChildren": true}"#
+        let entry = try JSONDecoder().decode(FolderEntry.self, from: Data(json.utf8))
+        XCTAssertEqual(entry.name, "Library")
+        XCTAssertNil(entry.isFolder, "not recorded then: the app checks on disk")
+    }
+
     func testAnUnmeasuredDataVolumeSurvivesSaving() throws {
         var s = Demo.snapshot()
         s.disk.dataVolumeUsed = nil

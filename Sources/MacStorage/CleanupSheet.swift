@@ -324,7 +324,7 @@ struct ResultsPhase: View {
                             Text("Also delete my \(plural(picked.count, "picked file")) (\(picked.bytesText)). These are your own files, possibly the only copies:").fontWeight(.medium)
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 1) {
-                                    ForEach(picked, id: \.landed) { Text("\($0.original) · \(formatBytes($0.bytes))").font(.system(.caption, design: .monospaced)) }
+                                    ForEach(picked, id: \.landed) { Text("\($0.original) · \([$0].bytesText)").font(.system(.caption, design: .monospaced)) }
                                 }
                             }
                             .frame(maxHeight: 90)
@@ -383,11 +383,7 @@ struct ResultsPhase: View {
 
 /// What a run freed in a destination, never showing an unmeasured result as a measured
 /// zero: "Not re-measured" when nothing could be measured, "≥ X" when only part could.
-func freedText(_ run: RunRecord, _ d: Destination) -> String {
-    let measured = d == .mac ? run.freedOnMac : run.freed(d)
-    guard run.unmeasuredCount(d) > 0 else { return (d == .mac && run.deletedFromTrashIsEstimate ? "≈ " : "") + formatBytes(measured) }
-    return measured == 0 ? "Not re-measured" : "≥ " + formatBytes(measured)
-}
+func freedText(_ run: RunRecord, _ d: Destination) -> String { run.freedText(d) }
 
 /// Lists a skipped cache folder again so it can be reviewed and run without a full scan.
 struct RefreshButton: View {

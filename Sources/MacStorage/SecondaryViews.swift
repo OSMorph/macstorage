@@ -146,12 +146,14 @@ struct HistoryView: View {
                 ForEach(owners, id: \.self) { id in Text(scans.last?.names[id] ?? id).tag(String?.some(id)) }
             }.labelsHidden().fixedSize()
         }
-        // Scans where the owner couldn't be measured are left out of its line, not drawn as zero.
-        Chart(Array(scans.enumerated()).filter { point($0.element) != nil }, id: \.offset) { i, s in
-            LineMark(x: .value("Scan", s.date), y: .value("GB", Double(point(s) ?? 0) / 1e9))
+        // A scan where the owner couldn't be measured breaks its line: each measured run of
+        // scans is its own segment, and a lone measured scan is a point.
+        let points = segmented(scans.map(point))
+        Chart(points, id: \.index) { p in
+            LineMark(x: .value("Scan", scans[p.index].date), y: .value("GB", Double(p.value) / 1e9), series: .value("Segment", p.segment))
                 .interpolationMethod(.monotone)
-            if i == from || i == to {
-                PointMark(x: .value("Scan", s.date), y: .value("GB", Double(point(s) ?? 0) / 1e9))
+            if p.isAlone || p.index == from || p.index == to {
+                PointMark(x: .value("Scan", scans[p.index].date), y: .value("GB", Double(p.value) / 1e9))
             }
         }
         .chartYAxisLabel("GB used per scan")
@@ -170,7 +172,10 @@ struct HistoryView: View {
                     .foregroundStyle(c.delta > 0 ? Color.errorText : Color.successText).monospacedDigit()
             }.width(150)
             TableColumn("Last scans") { (c: OwnerChange) in
-                Chart(c.series.enumerated().compactMap { i, v in v.map { (i, $0) } }, id: \.0) { LineMark(x: .value("i", $0.0), y: .value("b", Double($0.1))) }
+                Chart(segmented(c.series), id: \.index) { p in
+                    LineMark(x: .value("i", p.index), y: .value("b", Double(p.value)), series: .value("Segment", p.segment))
+                    if p.isAlone { PointMark(x: .value("i", p.index), y: .value("b", Double(p.value))).symbolSize(8) }
+                }
                     .chartXAxis(.hidden).chartYAxis(.hidden).frame(width: 90, height: 20).accessibilityHidden(true)
             }.width(100)
             TableColumn("Why") { (c: OwnerChange) in Text(c.notes.joined(separator: "; ")).foregroundStyle(.secondary) }
@@ -391,4 +396,24 @@ struct WelcomeView: View {
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+/// A measured value in a series, with the segment it belongs to: a nil value (not
+/// measured) ends a segment, so charts don't draw a line across it.
+struct SeriesPoint {
+    var index: Int
+    var value: Int64
+    var segment: Int
+    /// The only measured value in its segment: drawn as a point.
+    var isAlone: Bool
+}
+
+func segmented(_ values: [Int64?]) -> [SeriesPoint] {
+    var points: [SeriesPoint] = [], segment = 0
+    for (i, v) in values.enumerated() {
+        guard let v else { segment += 1; continue }
+        points.append(SeriesPoint(index: i, value: v, segment: segment, isAlone: false))
+    }
+    let sizes = Dictionary(grouping: points, by: \.segment).mapValues(\.count)
+    return points.map { var p = $0; p.isAlone = sizes[p.segment] == 1; return p }
 }

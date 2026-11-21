@@ -285,6 +285,25 @@ final class RunRecordTests: XCTestCase {
         XCTAssertEqual(step.expectedText, "≥ 5.0 GB")
     }
 
+    func testFreedTextNeverOverstatesWhatsKnown() {
+        var run = makeRun()
+        let go = index(run, "go/goBuildCache")
+        XCTAssertEqual(run.freedText(.mac), "2.9 GB", "exact only")
+        let estimate = TrashEntry(original: "~/a", landed: "/t/a", identity: nil, bytes: 10_000_000_000, picked: false, isEstimate: true)
+        run.trashDeletions = [.init(date: Demo.scanDate, deleted: [estimate], refused: [])]
+        XCTAssertEqual(run.freedText(.mac), "2.9 GB + ≈ 10.0 GB estimated", "exact plus estimate")
+        run.steps[go].outcome = .done(measured: nil)
+        XCTAssertEqual(run.freedText(.mac), "≈ 10.0 GB estimated, the rest not re-measured", "an estimate is never a minimum")
+        run.trashDeletions = []
+        XCTAssertEqual(run.freedText(.mac), "Not re-measured")
+        run.trashDeletions = [.init(date: Demo.scanDate, deleted: [estimate], refused: [])]
+        run.steps[go].outcome = .done(measured: 1_000_000_000)
+        run.steps.append(run.steps[go])
+        run.steps[run.steps.count - 1].step.item.id = "go/other"
+        run.steps[run.steps.count - 1].outcome = .done(measured: nil)
+        XCTAssertEqual(run.freedText(.mac), "≥ 1.0 GB + ≈ 10.0 GB estimated", "minimum only over measured bytes")
+    }
+
     func testTrashDeletionIsItsOwnEventAndOnlyCountsDeletedEntries() {
         var run = makeRun()
         let mine = TrashEntry(original: "~/Downloads/a.iso", landed: "/t/a.iso", identity: nil, bytes: 7, picked: true)

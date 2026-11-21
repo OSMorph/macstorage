@@ -577,6 +577,18 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertTrue(store.recoverJournaledRuns().isEmpty, "nothing left to reconcile")
     }
 
+    func testAnUnrelatedSaveDoesntHideAnOutOfDateCopy() throws {
+        let store = HistoryStore(folder: folder)
+        var run = bigRun()
+        try store.save(run)
+        run.trashDeletions.append(.init(date: .now, deleted: [], refused: ["/gone"]))
+        try store.journal(run)                       // A's full record moves on
+        Thread.sleep(forTimeInterval: 0.05)
+        try store.save(Demo.snapshot())              // then something else rewrites history.json
+        XCTAssertEqual(store.recoverJournaledRuns().map(\.id), [run.id])
+        XCTAssertEqual(store.loadHistory().runs.first?.trashDeletions.count, 1)
+    }
+
     func testAStaleReceiptIsWrittenAgainFromTheFullRecord() throws {
         let store = HistoryStore(folder: folder)
         var run = bigRun()

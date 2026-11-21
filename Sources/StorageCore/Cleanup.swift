@@ -275,6 +275,22 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
     public var deletedFromTrash: Int64 { trashDeletions.map(\.bytes).reduce(0, +) }
     /// True when part of what was deleted from the Trash couldn't be measured.
     public var deletedFromTrashIsEstimate: Bool { trashDeletions.contains(where: \.isEstimate) }
+
+    /// What a run freed in a destination, never overstating what's known: exact measured
+    /// bytes as is; "≥" only over measured bytes when some steps couldn't be re-measured;
+    /// "≈" for sizes deleted from the Trash that couldn't be measured; "Not re-measured"
+    /// when nothing was.
+    public func freedText(_ d: Destination) -> String {
+        let deleted = d == .mac ? trashDeletions.flatMap(\.deleted) : []
+        let exact = freed(d) + deleted.filter { !$0.isEstimate }.map(\.bytes).reduce(0, +)
+        let estimated = deleted.filter(\.isEstimate).map(\.bytes).reduce(0, +)
+        let unmeasured = unmeasuredCount(d) > 0
+        var parts: [String] = []
+        if exact > 0 || (estimated == 0 && !unmeasured) { parts.append((unmeasured ? "≥ " : "") + ByteFormat.string(exact)) }
+        if estimated > 0 { parts.append("≈ \(ByteFormat.string(estimated))" + (parts.isEmpty && !unmeasured ? "" : " estimated")) }
+        if unmeasured, exact == 0 { parts.append(parts.isEmpty ? "Not re-measured" : "the rest not re-measured") }
+        return parts.joined(separator: parts.count == 2 && unmeasured && exact == 0 ? ", " : " + ")
+    }
     /// Freed on the Mac by commands, plus whatever was later deleted from the Trash.
     public var freedOnMac: Int64 { freed(.mac) + deletedFromTrash }
     /// This run's entries that are still in the Trash.

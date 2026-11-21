@@ -111,13 +111,11 @@ public struct HistoryStore: Sendable {
     public func recoverJournaledRuns() -> [RunRecord] {
         let runs = folder.appending(path: "Runs")
         let files = (try? FileManager.default.contentsOfDirectory(atPath: runs.path)) ?? []
-        let history = loadHistory()
-        let compact = Dictionary(history.runs.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let historyDate = (try? FileManager.default.attributesOfItem(atPath: historyURL.path))?[.modificationDate] as? Date ?? .distantPast
+        let compact = Dictionary(loadHistory().runs.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        // Every full record is compared with its compact copy: a run's copy can be out of
+        // date however recently history.json itself was written.
         let stale = files.compactMap { name -> RunRecord? in
-            guard let id = UUID(uuidString: (name as NSString).deletingPathExtension) else { return nil }
-            let modified = (try? FileManager.default.attributesOfItem(atPath: runs.appending(path: name).path))?[.modificationDate] as? Date ?? .distantPast
-            guard compact[id] == nil || modified > historyDate, let full = fullRun(id) else { return nil }
+            guard let id = UUID(uuidString: (name as NSString).deletingPathExtension), let full = fullRun(id) else { return nil }
             return compact[id] == Self.compacted(full) ? nil : full
         }
         for run in stale { try? save(run) }

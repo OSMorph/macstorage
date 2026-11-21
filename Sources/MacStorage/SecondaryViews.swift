@@ -62,7 +62,10 @@ struct FoldersView: View {
                     }
                     if all.count > rows.count {
                         let rest = all.count - rows.count
-                        Text("The \(Self.rowLimit.formatted()) largest are listed; \(rest.formatted()) smaller ones aren't. Filter by name to find one.").font(.caption).foregroundStyle(.secondary)
+                        Text(filter.isEmpty
+                             ? "The \(Self.rowLimit.formatted()) largest are listed; \(rest.formatted()) smaller ones aren't. Filter by name to find one."
+                             : "\(Self.rowLimit.formatted()) matches are listed, exact names first; \(rest.formatted()) more match. Type more of the name.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 .padding(16).frame(minWidth: 480)

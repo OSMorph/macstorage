@@ -14,7 +14,7 @@ The design is in [docs/PLAN.md](docs/PLAN.md).
 
 1. In Terminal, download and install it in one go (replace the version with the latest from [Releases](../../releases)):
    ```sh
-   v=0.1.1; curl -fsSL "https://github.com/OSMorph/macstorage/releases/download/v$v/MacStorage-$v.zip" -o /tmp/macstorage.zip \
+   v=0.1.2; curl -fsSL "https://github.com/OSMorph/macstorage/releases/download/v$v/MacStorage-$v.zip" -o /tmp/macstorage.zip \
      && rm -rf /Applications/MacStorage.app && ditto -x -k /tmp/macstorage.zip /Applications && open /Applications/MacStorage.app
    ```
    The app is self-signed, not notarized by Apple. A browser download gets a quarantine mark, and macOS then says "Apple could not verify…" and won't open it. `curl` doesn't add that mark. If you did download it in a browser, run `xattr -dr com.apple.quarantine /Applications/MacStorage.app`, or click **Open Anyway** in System Settings → Privacy & Security.

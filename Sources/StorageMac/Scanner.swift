@@ -183,8 +183,9 @@ public enum FolderAttribution {
     /// a folder in `protected`. Checked right before listing; the walks below it never
     /// follow links or leave the volume themselves. On-demand levels repeat it before and
     /// after each entry: a folder replaced by a link mid-level stops there, and an entry
-    /// measured while it was replaced is discarded. (The reads during that one walk still
-    /// happen: file sizes only, by the same user, never shown.)
+    /// measured while it was replaced, and still replaced afterwards, is discarded. (A link
+    /// swapped in and back during one walk isn't caught: file sizes only, read as the same
+    /// user who made the link.)
     public static func refusal(_ path: String, home: String, protected: Set<String>) -> Refusal? {
         var st = stat(), homeStat = stat()
         guard lstat(path, &st) == 0 else { return errno == EACCES ? .unreadable : .notAFolder }

@@ -171,7 +171,7 @@ struct Inspector: View {
             HStack {
                 if let path = item.path { Button("Reveal in Finder") { revealInFinder(path) } }
             }
-            if item.isAutomaticCleanup, let d = item.action.destination {
+            if item.isAutomaticCleanup, model.cleanupState.partlyCleaned[item.id] == nil, let d = item.action.destination {
                 Toggle(isOn: Binding(get: { model.selected.contains(item.id) },
                                      set: { on in if on { model.selected.insert(item.id) } else { model.selected.remove(item.id) } })) {
                     HStack { Text("Include in cleanup"); Spacer(); Text(d.label).font(.caption).foregroundStyle(.secondary) }

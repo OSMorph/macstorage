@@ -234,7 +234,7 @@ struct CleanupView: View {
 
     var body: some View {
         if let s = model.snapshot, let plan = model.currentPlan {
-            let acc = Accounting(s, cleaned: Set(model.cleaned.keys))
+            let acc = Accounting(s, cleaned: model.actedOn)
             VStack(spacing: 0) {
                 List {
                     Text("Safe items are ticked for you. Probably-safe items start unticked. Review items only appear here once you've picked files in their details, and they only ever go to the Trash.")

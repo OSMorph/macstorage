@@ -133,7 +133,11 @@ final class AppModel {
         }
     }
 
-    var accounting: Accounting? { snapshot.map { Accounting($0, cleaned: Set(cleaned.keys)) } }
+    /// Items a cleanup since this scan acted on, fully or partly. They leave the totals and
+    /// Cleanup until a new scan: what's left of a partly cleaned item isn't known.
+    var actedOn: Set<String> { Set(cleaned.keys).union(cleanupState.partlyCleaned.keys) }
+
+    var accounting: Accounting? { snapshot.map { Accounting($0, cleaned: actedOn) } }
     var isRunning: Bool { if case .running? = sheet { true } else { false } }
 
     private func load(_ snapshot: Snapshot, history: History) {
@@ -142,8 +146,8 @@ final class AppModel {
         cleanupState = CleanupState(runs: history.runs, after: snapshot.date)
         dropRemovedPicks()
         // Safe items start ticked, except what a cleanup since this scan cleaned or skipped.
-        selected = Set(snapshot.owners.flatMap(\.items).filter { $0.tier == .safe && $0.isAutomaticCleanup && cleaned[$0.id] == nil }.map(\.id))
-            .subtracting(cleanupState.skipped)
+        selected = Set(snapshot.owners.flatMap(\.items).filter { $0.tier == .safe && $0.isAutomaticCleanup }.map(\.id))
+            .subtracting(actedOn).subtracting(cleanupState.skipped)
     }
 
     /// Picked entries already in the Trash can't be picked again.
@@ -251,7 +255,7 @@ final class AppModel {
     private func makePlan() -> CleanupPlan? {
         guard let snapshot else { return nil }
         let picked = picks.mapValues { ids in ids.map { Target($0) } }
-        return CleanupPlan(snapshot: snapshot, selected: selected, picks: picked, cleaned: Set(cleaned.keys))
+        return CleanupPlan(snapshot: snapshot, selected: selected, picks: picked, cleaned: actedOn)
     }
 
     private func refreshPlan() { currentPlan = makePlan() }
@@ -259,7 +263,7 @@ final class AppModel {
     /// The sidebar badge: ticked automatic items plus Review items with picks. Cheap enough
     /// to compute on every render, unlike building the plan.
     var cleanupCount: Int {
-        selected.filter { cleaned[$0] == nil }.count + picks.values.filter { !$0.isEmpty }.count
+        selected.subtracting(actedOn).count + picks.values.filter { !$0.isEmpty }.count
     }
 
     func openPreview() {
@@ -312,7 +316,7 @@ final class AppModel {
     private func finish(_ run: RunRecord) async {
         for r in run.steps { cleanupState.record(r, run: run.id) }
         // Cleaned steps leave Cleanup; a step whose list changed stays out until a new scan.
-        selected.subtract(cleaned.keys)
+        selected.subtract(actedOn)
         selected.subtract(cleanupState.skipped)
         dropRemovedPicks()
         history.runs.insert(run, at: 0)

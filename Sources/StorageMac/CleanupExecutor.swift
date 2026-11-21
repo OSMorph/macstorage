@@ -154,7 +154,7 @@ public struct CleanupExecutor: Sendable {
             return !now.isSameObject(as: seen)
         }.count
         guard unreviewed == 0 else {
-            return skip("\(plural(unreviewed, "file")) appeared or changed in the folder after you reviewed it. Scan again to review them.")
+            return skip("\(plural(unreviewed, "file")) appeared in the folder or were replaced after you reviewed it.")
         }
         var result = await execute(step, [command.arguments], tool: command.tool)
         let after = await offload { () -> Int64? in

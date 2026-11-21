@@ -16,7 +16,7 @@ struct OverviewView: View {
                         Tile(title: { TierBadge(tier: .review) }, value: formatBytes(acc.reviewOnDisk), unit: "on disk",
                              note: "Your own data. Nothing estimated: only you can decide what goes.")
                         Tile(title: { Text(s.isPartial ? "Not scanned or attributed yet" : "Not attributed yet") }, value: formatBytes(s.unattributed), unit: "on disk",
-                             note: s.isPartial ? "Includes what this stopped scan didn't reach: \(s.unfinishedAreas.filter { $0 != "Folder sizes" }.joined(separator: ", ")) and anything outside your home folder."
+                             note: s.isPartial ? partialNote(s)
                                 : model.fullDiskAccess || model.demo ? "Mostly outside your home folder (/Applications, /Library, /private), which this scan didn't measure."
                                 : "Folders macOS hides without Full Disk Access, plus places outside your home folder this scan didn't measure.",
                              link: ("See scan coverage", { model.section = .coverage }))
@@ -29,6 +29,13 @@ struct OverviewView: View {
                 .padding(20)
             }
         }
+    }
+
+    /// What a stopped scan's unattributed space includes.
+    private func partialNote(_ s: Snapshot) -> String {
+        let areas = s.unfinishedAreas.filter { $0 != "Folder sizes" }
+        return "Includes " + (areas.isEmpty ? "folders this stopped scan didn't size" : "what this stopped scan didn't reach (\(areas.joined(separator: ", ")))")
+            + ", and anything outside your home folder."
     }
 
     private func hero(_ s: Snapshot) -> some View {

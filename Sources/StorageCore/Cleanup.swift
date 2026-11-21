@@ -206,8 +206,10 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
         self.trashDeletions = trashDeletions
     }
 
-    public var doneCount: Int { steps.filter(\.outcome.isDone).count }
-    public var partialCount: Int { steps.filter(\.outcome.isPartial).count }
+    /// Steps that removed everything approved.
+    public var doneCount: Int { steps.filter { $0.outcome.isDone && $0.leftAlone.isEmpty }.count }
+    /// Steps that removed part of what was approved: stopped by a problem, or with targets left alone.
+    public var partialCount: Int { steps.filter { $0.outcome.isPartial || ($0.outcome.isDone && !$0.leftAlone.isEmpty) }.count }
 
     /// "3 of 5 steps done, 1 partly done"
     public var progressText: String {

@@ -308,6 +308,17 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertFalse(tools.calls.contains("go clean -cache"))
     }
 
+    func testAFileRewrittenInPlaceDoesntSkipTheClear() async throws {
+        let folder = try cacheFolder()
+        let s = try cacheStep(folder)
+        let handle = try FileHandle(forWritingTo: folder.appending(path: "a"))
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data([9]))   // same file, new contents (like an index or trim stamp)
+        try handle.close()
+        let result = await executor(goTools(folder, clearing: true)).perform(s, previewTime: .now)
+        XCTAssertTrue(result.outcome.isDone, "\(result.outcome)")
+    }
+
     func testAReplacedFolderSkipsTheClear() async throws {
         let folder = try cacheFolder()
         let s = try cacheStep(folder)

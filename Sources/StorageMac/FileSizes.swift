@@ -123,7 +123,7 @@ public enum FileSizes {
     }
 
     /// Lists beyond this many entries aren't kept: the step is then handed to the user.
-    public static let manifestLimit = 200_000
+    public static let manifestLimit = 400_000
 
     /// Every entry under `path` (files, folders, symlinks, every name of a hard-linked
     /// file) with its identity, for a cleanup manifest, plus whether the list is complete.

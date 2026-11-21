@@ -329,6 +329,21 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertTrue(result.outcome.isDone, "\(result.outcome)")
     }
 
+    func testTheNpmStepChecksTheFolderNpmCleans() async throws {
+        let cache = home.appending(path: "npm-cache"), cacache = cache.appending(path: "_cacache")
+        try FileManager.default.createDirectory(at: cacache, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: cacache.appending(path: "index").path, contents: Data(repeating: 1, count: 4_000))
+        let (targets, _) = FileSizes.manifest(FileSizes.realPath(cacache.path)!)
+        var s = step(targets, action: .clearFolder(Command("npm", ["cache", "clean", "--force"]), root: cacache.path, .mac), kind: .npmCache)
+        s.item.scopeGuard = .folder(try XCTUnwrap(FileSizes.directoryIdentity(cacache.path)))
+        // npm reports the cache folder; it cleans _cacache inside it. A log next to it isn't in scope.
+        FileManager.default.createFile(atPath: cache.appending(path: "debug.log").path, contents: Data([1]))
+        let tools = FakeTools([{ $0 == "npm config get cache" ? ToolOutput(status: 0, stdout: cache.path + "\n") : nil }])
+        let result = await executor(tools).perform(s, previewTime: .now)
+        XCTAssertTrue(result.outcome.isDone, "\(result.outcome)")
+        XCTAssertTrue(tools.calls.contains("npm cache clean --force"))
+    }
+
     func testAReplacedFolderSkipsTheClear() async throws {
         let folder = try cacheFolder()
         let s = try cacheStep(folder)
@@ -538,9 +553,12 @@ final class HistoryStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let history = folder.appending(path: "history.json")
         try Data("not json".utf8).write(to: history)
-        chmod(folder.path, 0o555)   // the folder can't be changed, so the file can't be moved aside
+        try FileManager.default.createDirectory(at: folder.appending(path: "Runs"), withIntermediateDirectories: true)
+        chmod(folder.path, 0o555)   // Runs stays writable; history.json can't be moved aside or replaced
         defer { chmod(folder.path, 0o755) }
-        XCTAssertThrowsError(try store.save(bigRun()))
+        let run = bigRun()
+        XCTAssertThrowsError(try store.save(run)) { XCTAssertTrue($0 is HistoryStore.StoreError, "\($0)") }
+        XCTAssertNotNil(store.fullRun(run.id), "the full record was written; only the history step refused")
         XCTAssertEqual(try String(contentsOf: history, encoding: .utf8), "not json")
     }
 
@@ -592,6 +610,35 @@ final class RunningAppsTests: XCTestCase {
 }
 
 final class ProviderTests: XCTestCase {
+    func testBuildOutputWithTrackedFilesIsntOffered() async throws {
+        let repo = FileManager.default.temporaryDirectory.appending(path: "repo-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: repo) }
+        for name in [".git", "dist", "node_modules"] {
+            try FileManager.default.createDirectory(at: repo.appending(path: name), withIntermediateDirectories: true)
+        }
+        let tools = FakeTools([
+            { $0.contains("status") ? ToolOutput(status: 0, stdout: "## main...origin/main\n") : nil },
+            { $0.hasSuffix("ls-files -- dist") ? ToolOutput(status: 0, stdout: "dist/app.js\n") : nil },
+        ])
+        let checkout = await GitProvider().inspect(ScanContext(tools: tools, home: repo.path, fullDiskAccess: true), repo.path, isWorktree: false)
+        XCTAssertEqual(checkout.buildOutput.map { ($0.target.id as NSString).lastPathComponent }, ["node_modules"], "a committed dist/ is source")
+    }
+
+    func testAFailedDockerListingLeavesItsItemOutAndSaysSo() async throws {
+        let home = FileManager.default.temporaryDirectory.appending(path: "docker-home-\(UUID().uuidString)")
+        let tools = FakeTools([
+            { $0.contains("context ls") ? ToolOutput(status: 0, stdout: #"{"Name":"c","DockerEndpoint":"unix:///tmp/d.sock"}"#) : nil },
+            { $0.contains(" info ") ? ToolOutput(status: 0, stdout: "ENGINE1\tDocker engine\n") : nil },
+            { $0.contains("system df") ? ToolOutput(status: 0, stdout: #"{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"1GB (100%)"}"#) : nil },
+            { $0.contains(" images ") ? ToolOutput(status: 1, stdout: "", stderr: "boom") : nil },
+        ])
+        let result = await DockerProvider().scan(ScanContext(tools: tools, home: home.path, fullDiskAccess: true))
+        let kinds = result.owners.flatMap(\.items).map(\.kind)
+        XCTAssertFalse(kinds.contains(.dockerUnusedImages), "no empty list presented as nothing to clean")
+        XCTAssertTrue(result.coverage.contains { $0.status == .failed })
+        XCTAssertTrue(result.owners.first?.hostSizeUnknown == true)
+    }
+
     func testDeviceSupportSortsByOSVersion() {
         XCTAssertEqual(XcodeProvider.osVersion("/x/iOS DeviceSupport/iPhone15,2 17.10 (21C62)"), "17.10")
         XCTAssertEqual(["17.2", "17.10", "16.4"].sorted { $0.compare($1, options: .numeric) == .orderedDescending }, ["17.10", "17.2", "16.4"])

@@ -41,7 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let model = Self.model
         if model.isBusy {
             // If the record couldn't be saved, stay open: the results offer to save it again.
-            model.quitWhenDone { saved in NSApp.reply(toApplicationShouldTerminate: saved) }
+            // Once it's done, quitting goes through the unsaved-records question if any remain.
+            model.quitWhenDone { saved in
+                NSApp.reply(toApplicationShouldTerminate: saved)
+                if !saved { DispatchQueue.main.async { NSApp.terminate(nil) } }
+            }
             return .terminateLater
         }
         guard !model.unsavedRuns.isEmpty, !model.demo else { return .terminateNow }

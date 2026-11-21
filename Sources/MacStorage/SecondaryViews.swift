@@ -17,9 +17,8 @@ struct FoldersView: View {
             let level = model.folderLevel(model.folderPath)
             let entries = level?.entries ?? []
             let all = filter.isEmpty ? entries : entries.filter { $0.name.localizedCaseInsensitiveContains(filter) }
-            let rows = all.count > Self.rowLimit
-                ? Array(all.sorted { $0.sortBytes > $1.sortBytes }.prefix(Self.rowLimit)).sorted(using: order)
-                : all.sorted(using: order)
+            // Entries come largest first, so the limit keeps the largest without sorting them all.
+            let rows = Array(all.prefix(Self.rowLimit)).sorted(using: order)
             HSplitView {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -72,7 +71,7 @@ struct FoldersView: View {
 
     /// The largest 200 entries, and the rest as one cell: the treemap folds slivers anyway.
     private func treemapNodes(_ entries: [FolderEntry]) -> [TreemapNode] {
-        let sized = entries.filter { ($0.bytes ?? 0) > 0 }.sorted { $0.sortBytes > $1.sortBytes }
+        let sized = entries.filter { ($0.bytes ?? 0) > 0 }
         let nodes = sized.prefix(200).map { TreemapNode(id: $0.name, label: $0.name, value: Double($0.bytes ?? 0), reclaimable: 0, color: $0.kind.color) }
         let rest = sized.dropFirst(200)
         guard !rest.isEmpty else { return nodes }

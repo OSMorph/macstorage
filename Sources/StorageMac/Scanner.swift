@@ -185,7 +185,7 @@ public enum FolderAttribution {
     public static func refusal(_ path: String, home: String, protected: Set<String>) -> Refusal? {
         var st = stat(), homeStat = stat()
         guard lstat(path, &st) == 0, st.st_mode & S_IFMT == S_IFDIR else { return .notAFolder }
-        guard path.hasPrefix(home + "/"), let real = FileSizes.realPath(path), let realHome = FileSizes.realPath(home),
+        guard path == home || path.hasPrefix(home + "/"), let real = FileSizes.realPath(path), let realHome = FileSizes.realPath(home),
               real == realHome + path.dropFirst(home.count) else { return .throughLink }
         guard stat(home, &homeStat) == 0, st.st_dev == homeStat.st_dev else { return .otherVolume }
         return protected.contains { isInside(path, $0) } ? .needsFullDiskAccess : nil

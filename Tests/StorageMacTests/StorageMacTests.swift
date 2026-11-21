@@ -653,6 +653,12 @@ final class FolderMeasurementsTests: XCTestCase {
         XCTAssertNil(m.measuring)
     }
 
+    func testMergedEntriesStayLargestFirst() {
+        func e(_ n: String, _ b: Int64?) -> FolderEntry { FolderEntry(name: n, bytes: b, kind: .apps) }
+        let merged = FolderMeasurements.merge([e("a", 9), e("b", 5), e("c", nil)], [e("d", 7), e("e", 1)])
+        XCTAssertEqual(merged.map(\.name), ["a", "d", "b", "e", "c"])
+    }
+
     @MainActor func testARefusedFolderIsNeverRead() async throws {
         let disk = Disk(names: names)
         let m = disk.measurements(home: home.path)

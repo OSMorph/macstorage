@@ -6,6 +6,7 @@ import StorageCore
 public struct FolderLevel: Sendable {
     /// Tells this level from one measured again later at the same path.
     public let id = UUID()
+    /// Largest first, like the scan's levels.
     public var entries: [FolderEntry] = []
     /// Entries listed but not measured yet.
     public var pending: Set<String> = []
@@ -149,8 +150,19 @@ public final class FolderMeasurements {
     /// results can arrive after a resumed run measured the same names.
     private func record(_ results: (found: [FolderEntry], done: [String]), in path: String, _ id: UUID) {
         guard !results.done.isEmpty, levels[path]?.id == id, let pending = levels[path]?.pending else { return }
-        levels[path]?.entries += results.found.filter { pending.contains($0.name) }
+        let new = results.found.filter { pending.contains($0.name) }.sorted { ($0.bytes ?? -1) > ($1.bytes ?? -1) }
+        if let entries = levels[path]?.entries { levels[path]?.entries = Self.merge(entries, new) }
         levels[path]?.pending.subtract(results.done)
+    }
+
+    /// Two lists sorted largest first, merged into one, without sorting it all again.
+    nonisolated static func merge(_ a: [FolderEntry], _ b: [FolderEntry]) -> [FolderEntry] {
+        var out: [FolderEntry] = [], i = 0, j = 0
+        out.reserveCapacity(a.count + b.count)
+        while i < a.count, j < b.count {
+            if (a[i].bytes ?? -1) >= (b[j].bytes ?? -1) { out.append(a[i]); i += 1 } else { out.append(b[j]); j += 1 }
+        }
+        return out + a[i...] + b[j...]
     }
 
     /// Results measured but not shown yet.

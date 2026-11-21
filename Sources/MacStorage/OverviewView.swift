@@ -16,7 +16,7 @@ struct OverviewView: View {
                         Tile(title: { TierBadge(tier: .review) }, value: formatBytes(acc.reviewOnDisk), unit: "on disk",
                              note: "Your own data. Nothing estimated: only you can decide what goes.")
                         Tile(title: { Text(s.isPartial ? "Not scanned or attributed yet" : "Not attributed yet") }, value: formatBytes(s.unattributed), unit: "on disk",
-                             note: s.isPartial ? "Includes everything in \(s.unfinishedAreas.joined(separator: ", ")), which this stopped scan didn't reach."
+                             note: s.isPartial ? "Includes what this stopped scan didn't reach: \(s.unfinishedAreas.filter { $0 != "Folder sizes" }.joined(separator: ", ")) and anything outside your home folder."
                                 : model.fullDiskAccess || model.demo ? "Mostly outside your home folder (/Applications, /Library, /private), which this scan didn't measure."
                                 : "Folders macOS hides without Full Disk Access, plus places outside your home folder this scan didn't measure.",
                              link: ("See scan coverage", { model.section = .coverage }))

@@ -156,7 +156,7 @@ public enum Rules {
         case .podmanUnusedImages:
             return Rule(name: "Images no container uses", tier: .probablySafe,
                         why: "\(f.count("unused")) of \(f.count("total")) images have no container, running or stopped. They download or rebuild when needed. The app removes exactly the approved names (or IDs for untagged images); Podman refuses any image a container has started using since.",
-                        basis: "Right before running, the app checks that each name still points at the image you reviewed and that the connection still reaches the same machine, and skips the step if not. Images share layers, so the space freed is at most the figure shown.",
+                        basis: "Right before running, the app checks that each name still points at the image you reviewed and that the connection still points at the same machine address and answers, and skips the step if not. Images share layers, so the space freed is at most the figure shown.",
                         action: .runOnTargets(podman(["image", "rm", "--no-prune"]), .containerDisk), unit: "image")
         case .podmanStoppedContainers:
             return Rule(name: "Stopped containers", tier: .review,
@@ -167,8 +167,8 @@ public enum Rules {
                         why: "\(f.count("unused")) of \(f.count("total")) volumes aren't attached to a container. Volumes often hold databases, and Podman deletes them immediately, so the app never removes them for you: check the list and run the command yourself.",
                         action: .userRunsCommand(([podman(["volume", "rm"]).display()] + f.targets.map(\.id)).joined(separator: " "), needsAdmin: false), unit: "volume")
         case .podmanVMDisk:
-            return Rule(name: "VM disk (machine not running)", tier: .leaveAlone,
-                        why: "The Podman machine isn't running, so the app can't see what's inside its disk, and it never starts a machine itself. Start it and scan again to see its images and volumes.")
+            return Rule(name: "VM disk", tier: .leaveAlone,
+                        why: "The app couldn't look inside this Podman machine (it isn't running, or Podman didn't answer), and it never starts a machine itself. Start it and scan again to see its images and volumes.")
         case .goModuleCache:
             return Rule(name: "Module cache", tier: .safe, why: "Downloaded module sources. Go downloads them again on the next build.",
                         basis: rootCheck, action: .clearFolder(Command("go", ["clean", "-modcache"]), root: root, .mac), unit: "module version")

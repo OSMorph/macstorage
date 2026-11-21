@@ -459,11 +459,70 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertFalse(tools.calls.contains { $0.contains("--connection dev-root") }, "the same store isn't counted twice")
     }
 
+    /// A running machine "dev" with one disk file, answering through `answers`.
+    func podmanMachine(_ answers: [(String) -> ToolOutput?], listAllProviders: Bool = true) async throws -> (ProviderResult, FakeTools) {
+        let home = FileManager.default.temporaryDirectory.appending(path: "podman-home-\(UUID().uuidString)")
+        let folder = home.appending(path: ".local/share/containers/podman/machine/libkrun")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: home) }
+        FileManager.default.createFile(atPath: folder.appending(path: "dev-arm64.raw").path, contents: Data(repeating: 1, count: 1 << 20))
+        let machines = #"[{"Name":"dev","Running":true,"VMType":"libkrun"}]"#
+        let tools = FakeTools([
+            { $0.contains("machine list --all-providers") ? (listAllProviders ? ToolOutput(status: 0, stdout: machines) : ToolOutput(status: 125, stdout: "", stderr: "unknown flag")) : nil },
+            { $0.contains("machine list --format") ? ToolOutput(status: 0, stdout: machines) : nil },
+            { $0.contains("connection list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","URI":"ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock","IsMachine":true},{"Name":"dev-root","URI":"ssh://root@127.0.0.1:50000/run/podman/podman.sock","IsMachine":true}]"#) : nil },
+        ] + answers)
+        return (await PodmanProvider().scan(ScanContext(tools: tools, home: home.path, fullDiskAccess: true)), tools)
+    }
+
+    func testOlderPodmanIsListedWithoutAllProviders() async throws {
+        let (result, tools) = try await podmanMachine([], listAllProviders: false)
+        XCTAssertTrue(tools.calls.contains("podman machine list --format json"))
+        XCTAssertNotNil(result.owners.first { $0.id == "podman:dev" })
+    }
+
+    func testARootfulStoreWithSomethingInItIsShown() async throws {
+        let (result, _) = try await podmanMachine([
+            { $0.hasPrefix("podman --connection dev-root volume") ? ToolOutput(status: 0, stdout: "rootdata\n") : nil },
+        ])
+        let volumes = result.owners.first?.items.filter { $0.kind == .podmanUnusedVolumes } ?? []
+        XCTAssertEqual(volumes.map(\.name).sorted(), ["Volumes no container uses", "Volumes no container uses (rootful)"], "a 0-byte volume still counts")
+        XCTAssertEqual(volumes.first { $0.name.hasSuffix("(rootful)") }?.targets.map(\.id), ["rootdata"])
+    }
+
+    func testAMachineThatDoesntAnswerShowsOnlyItsDisk() async throws {
+        let (result, _) = try await podmanMachine([{ $0.contains(" system df") ? ToolOutput(status: 125, stdout: "", stderr: "connection refused") : nil }])
+        let owner = try XCTUnwrap(result.owners.first)
+        XCTAssertEqual(owner.items.map(\.kind), [.podmanVMDisk], "not the whole disk as VM overhead")
+        XCTAssertTrue(owner.items.first?.path?.hasSuffix("/dev-arm64.raw") == true, "its own disk file")
+        let coverage = try XCTUnwrap(result.coverage.first)
+        XCTAssertEqual(coverage.status, .failed)
+        XCTAssertTrue(coverage.detail.contains("didn't answer"), coverage.detail)
+    }
+
+    func testStoppedContainersLeaveOutRunningPausedAndPodInfra() async throws {
+        let (result, _) = try await podmanMachine([
+            { $0.hasPrefix("podman --connection dev ps") ? ToolOutput(status: 0, stdout: "web\trunning\tfalse\njob\texited\tfalse\nnew\tcreated\tfalse\nhold\tpaused\tfalse\npod-infra\tcreated\ttrue\n") : nil },
+        ])
+        let stopped = result.owners.first?.items.first { $0.kind == .podmanStoppedContainers && !$0.name.contains("rootful") }
+        XCTAssertEqual(stopped?.targets.map(\.id), ["job", "new"])
+    }
+
     func testPodmanDiskNamesMatchTheirMachine() {
         XCTAssertTrue(PodmanProvider.isDisk("podman-machine-default-arm64.raw", of: "podman-machine-default"))
         XCTAssertTrue(PodmanProvider.isDisk("podman-machine-default_fedora-coreos-40-qemu.x86_64.qcow2", of: "podman-machine-default"))
         XCTAssertFalse(PodmanProvider.isDisk("podman-machine-default-arm64.json", of: "podman-machine-default"))
         XCTAssertFalse(PodmanProvider.isDisk("dev-2-arm64.raw", of: "dev", others: ["dev", "dev-2"]))
+    }
+
+    func testADockerContextIsMeasuredWhenTheVersionCheckFails() async {
+        let tools = FakeTools([
+            { $0.contains("context ls") ? ToolOutput(status: 0, stdout: #"{"Name":"c","DockerEndpoint":"unix:///tmp/d.sock"}"#) : nil },
+            { $0.contains(" info ") ? ToolOutput(status: 0, stdout: "ID1\tDocker engine\n") : nil },
+            { $0.contains(" version ") ? ToolOutput(status: 1, stdout: "", stderr: "boom") : nil },
+        ])
+        let result = await DockerProvider().scan(ScanContext(tools: tools, home: NSTemporaryDirectory(), fullDiskAccess: true))
+        XCTAssertEqual(result.owners.map(\.id), ["docker:c"])
     }
 
     func testADockerContextThatReachesPodmanIsLeftToPodman() async {

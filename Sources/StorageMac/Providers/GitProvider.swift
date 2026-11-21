@@ -123,9 +123,9 @@ public struct GitProvider: Provider {
                 ignored.append(path + "/" + name)
             }
         }
-        let short = ctx.walk(limit: .seconds(20)), long = ctx.walk(limit: .seconds(30), skipGitCheckouts: true)
+        let short = ctx.walk(limit: .seconds(20)), long = ctx.walk(limit: .seconds(30), skipGitCheckouts: true), outputs = ignored
         let (build, size) = await offload {
-            (ignored.map { p in
+            (outputs.map { p in
                 let size = FileSizes.measure(p, short)
                 return (target: Target(p, bytes: size.privateBytes, identity: FileSizes.identity(p)), size: size)
             },

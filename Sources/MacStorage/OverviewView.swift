@@ -140,8 +140,8 @@ struct OwnerRanking: View {
     @State private var selection: Owner.ID?
 
     var body: some View {
-        let top = Array(snapshot.owners.sorted { $0.onDisk > $1.onDisk }.prefix(12))
-        let maxValue = Double(max(top.first?.onDisk ?? 1, 1))
+        let top = Array(snapshot.owners.sorted { $0.hostOnDisk > $1.hostOnDisk }.prefix(12))
+        let maxValue = Double(max(top.first?.hostOnDisk ?? 1, 1))
         Table(top, selection: $selection) {
             TableColumn("Owner") { o in
                 Label { Text(o.name) } icon: { RoundedRectangle(cornerRadius: 2).fill(o.kind.color).frame(width: 8, height: 8) }
@@ -149,11 +149,11 @@ struct OwnerRanking: View {
             TableColumn("Kind") { o in Text(o.kind.label).foregroundStyle(.secondary) }.width(130)
             TableColumn("On disk") { o in MeasureText(measure: o.onDiskMeasure) }.width(80)
             TableColumn("") { o in
-                let r = min(o.onDisk, accounting.reclaimable(owner: o).onHost)
+                let r = min(o.hostOnDisk, accounting.reclaimable(owner: o).onHost)
                 GeometryReader { g in
                     HStack(spacing: 1) {
                         Rectangle().fill(o.kind.color).frame(width: g.size.width * Double(r) / maxValue)
-                        Rectangle().fill(o.kind.color.opacity(0.35)).frame(width: g.size.width * Double(max(0, o.onDisk - r)) / maxValue)
+                        Rectangle().fill(o.kind.color.opacity(0.35)).frame(width: g.size.width * Double(max(0, o.hostOnDisk - r)) / maxValue)
                     }
                 }.frame(height: 10).accessibilityHidden(true)
             }

@@ -86,7 +86,7 @@ public struct Accounting: Sendable {
 
     /// Bytes per kind for the disk bar.
     public var onDiskByKind: [OwnerKind: Int64] {
-        snapshot.owners.reduce(into: [:]) { $0[$1.kind, default: 0] += $1.onDisk }
+        snapshot.owners.reduce(into: [:]) { $0[$1.kind, default: 0] += $1.hostOnDisk }
     }
 
     /// The disk bar: owners by kind, then what no owner accounts for, then free space.

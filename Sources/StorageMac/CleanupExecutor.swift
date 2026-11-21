@@ -265,6 +265,7 @@ public struct CleanupExecutor: Sendable {
     /// what the user approved are left alone and listed; that isn't a failure.
     private func moveToTrash(_ step: CleanupStep) async -> RunRecord.StepResult {
         var moved: [TrashEntry] = [], problems: [String] = [], leftAlone: [String] = []
+        var allMeasured = true
         let realHome = FileSizes.realPath(home) ?? home
         for target in step.approvedTargets {
             let path = expand(target.id)
@@ -286,7 +287,10 @@ public struct CleanupExecutor: Sendable {
                 leftAlone.append("\(target.id): \(why)")
                 continue
             }
-            let bytes = await offload { FileSizes.measure(path).privateBytes }
+            let size = await offload { FileSizes.measure(path) }
+            // An incomplete walk can't give an exact size: use the scan's figure and say so.
+            if !size.isComplete { allMeasured = false }
+            let bytes = size.isComplete ? size.privateBytes : target.bytes ?? size.privateBytes
             do {
                 var landed: NSURL?
                 try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &landed)
@@ -297,7 +301,7 @@ public struct CleanupExecutor: Sendable {
                 problems.append("\(target.id): \(error.localizedDescription)")
             }
         }
-        let measured = moved.map(\.bytes).reduce(0, +)
+        let measured: Int64? = allMeasured ? moved.map(\.bytes).reduce(0, +) : nil
         // When nothing moved, nothing irreversible happened: skipped, so later steps still run.
         let outcome: StepOutcome = if moved.isEmpty {
             .skipped(reason: problems.isEmpty ? "Nothing on the approved list was still as you reviewed it."

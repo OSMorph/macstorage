@@ -118,6 +118,18 @@ final class AccountingTests: XCTestCase {
         XCTAssertGreaterThan(segments.first { $0.id == "other" }!.bytes, 0, "space outside the Data volume is shown, not dropped")
     }
 
+    func testAnEngineWhoseVMDiskWasntFoundIsntCountedOnTheMac() {
+        var s = Demo.snapshot()
+        let before = s.unattributed
+        let i = s.owners.firstIndex { $0.id == "docker" }!
+        let docker = s.owners[i]
+        s.owners[i] = Owner(id: "docker", name: docker.name, kind: docker.kind, location: "", hostSizeUnknown: true, items: docker.items)
+        XCTAssertEqual(s.owners[i].hostOnDisk, 0)
+        XCTAssertEqual(s.owners[i].onDiskMeasure, .unknown)
+        XCTAssertGreaterThan(s.unattributed, before, "its space is unattributed, not guessed from what's inside the VM")
+        XCTAssertEqual(Accounting(s).diskSegments.map(\.bytes).reduce(0, +), s.disk.total)
+    }
+
     func testOnHostLeavesOutDockersDisk() {
         var r = Reclaimable()
         r.byDestination = [.mac: 1, .trash: 2, .containerDisk: 4]

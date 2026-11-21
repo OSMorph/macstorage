@@ -146,7 +146,7 @@ public struct DockerProvider: Provider {
         // On the Mac, the engine occupies its VM disk; the items above are sized inside it.
         let dataFolder = disk.map { ($0 as NSString).deletingLastPathComponent }
         for i in facts.indices { facts[i].path = dataFolder }
-        var note = "Sized inside the engine's VM. Its disk file on your Mac wasn't found\(ctx.fullDiskAccess ? "" : " (it may need Full Disk Access)"), so the size shown is what's inside, a lower bound."
+        var note = "Sized inside the engine's VM. Its disk file on your Mac wasn't found\(ctx.fullDiskAccess ? "" : " (it may need Full Disk Access)"), so its size on your Mac is unknown and isn't counted in the disk totals."
         var hostBytes: Int64?
         if let disk {
             let onMac = await offload { FileSizes.measure(disk).allocated }
@@ -159,7 +159,7 @@ public struct DockerProvider: Provider {
         var coverage = [CoverageEntry(area: engineName, status: .measured, detail: "Running; measured through the \(context) context.")]
         if !failed.isEmpty {
             coverage.append(CoverageEntry(area: "\(engineName) listings", status: .failed,
-                                          detail: "Couldn't list \(failed.joined(separator: "; ")), so those items aren't shown; their space is still in the engine's total."))
+                                          detail: "Couldn't list \(failed.joined(separator: "; ")), so those items aren't shown" + (disk == nil ? "." : "; their space is still in the VM disk's size.")))
         }
         let owner = Owner(id: "docker:\(context)", name: engineName, kind: .developerTools,
                           location: dataFolder.map(ctx.display) ?? "context \(context)", note: note, hostBytes: hostBytes, hostSizeUnknown: disk == nil,

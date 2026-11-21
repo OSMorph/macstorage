@@ -319,7 +319,7 @@ final class AppModel {
         await persist(run)
         stopping = false
         sheet = .results(run)
-        finishedBusyWork(saved: unsavedRuns[run.id] == nil)
+        finishedBusyWork(saved: unsavedRuns.isEmpty)
     }
 
     func persist(_ run: RunRecord) async {
@@ -331,7 +331,7 @@ final class AppModel {
 
     func deleteFromTrash(_ run: RunRecord, includePicked: Bool) async {
         deletingFromTrash = true
-        defer { deletingFromTrash = false; finishedBusyWork(saved: unsavedRuns[run.id] == nil) }
+        defer { deletingFromTrash = false; finishedBusyWork(saved: unsavedRuns.isEmpty) }
         let chosen = run.stillInTrash.filter { includePicked || !$0.picked }
         // The record on disk is the full one, unless this session has changes it couldn't save.
         let demo = demo, store = store, useMemory = demo || unsavedRuns[run.id] != nil
@@ -348,15 +348,18 @@ final class AppModel {
         if case .results? = sheet { sheet = .results(updated) }
     }
 
-    /// The run's receipt file, or the reason it couldn't be written.
+    /// The run's receipt file, or the reason it couldn't be written. While the run's record
+    /// is unsaved, the receipt is written from the record in memory, the latest one.
     func receipt(_ run: RunRecord) async -> Result<URL, Error> {
-        let store = store
-        return await offload { Result<URL, Error> { try store.receipt(run) } }
+        let store = store, latest = unsavedRuns[run.id] != nil ? history.runs.first { $0.id == run.id } ?? run : nil
+        return await offload { Result<URL, Error> { try latest.map(store.writeReceipt) ?? store.receipt(run) } }
     }
 
-    /// The run as recorded in full (History keeps a compact copy).
+    /// The run as recorded in full (History keeps a compact copy); the one in memory while
+    /// it's unsaved.
     func fullRun(_ run: RunRecord) async -> RunRecord {
-        guard !demo else { return run }
+        if demo { return run }
+        if unsavedRuns[run.id] != nil { return history.runs.first { $0.id == run.id } ?? run }
         let store = store
         return await offload { store.fullRun(run.id) ?? run }
     }

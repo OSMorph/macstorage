@@ -478,6 +478,17 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertTrue(try String(contentsOf: written, encoding: .utf8).contains("/cache/file-299"))
     }
 
+    func testAStaleReceiptIsWrittenAgainFromTheFullRecord() throws {
+        let store = HistoryStore(folder: folder)
+        var run = bigRun()
+        let first = try XCTUnwrap(try store.save(run))
+        Thread.sleep(forTimeInterval: 0.05)
+        run.trashDeletions.append(.init(date: .now, deleted: [], refused: ["/gone"]))
+        try store.save(run, receipt: false)   // the record moved on, the receipt didn't
+        XCTAssertEqual(try store.receipt(run), first)
+        XCTAssertTrue(try String(contentsOf: first, encoding: .utf8).contains("/gone"))
+    }
+
     func testSavingACompactCopyNeverTruncatesTheFullRecord() throws {
         let store = HistoryStore(folder: folder)
         let run = bigRun()

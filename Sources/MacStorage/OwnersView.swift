@@ -15,7 +15,7 @@ struct OwnersView: View {
                         ItemTable(model: model, owner: owner, accounting: acc)
                     } else {
                         Treemap(nodes: s.owners.map { o in
-                            TreemapNode(id: o.id, label: o.name, value: Double(o.onDisk), reclaimable: Double(min(o.onDisk, acc.reclaimable(owner: o).onHost)), color: o.kind.color)
+                            TreemapNode(id: o.id, label: o.name, value: Double(o.hostOnDisk), reclaimable: Double(min(o.hostOnDisk, acc.reclaimable(owner: o).onHost)), color: o.kind.color)
                         }, selected: nil) { model.show(owner: $0) }
                         .frame(height: 300)
                         OwnerTable(model: model, snapshot: s, accounting: acc)

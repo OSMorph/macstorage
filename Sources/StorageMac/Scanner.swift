@@ -147,7 +147,8 @@ public struct Scanner: Sendable {
     /// A snapshot from what the providers found.
     static func assemble(started: Date, owners: [Owner], coverage: [CoverageEntry], folders: [String: [FolderEntry]]) -> Snapshot {
         Snapshot(date: started, scanDuration: Date().timeIntervalSince(started), disk: SystemProvider.diskUsage(),
-                 owners: owners.filter { $0.onDisk > 0 || $0.items.contains { $0.onDisk == .notMeasured } }.sorted { $0.onDisk > $1.onDisk },
+                 // Keep owners with a size, or one that's unknown or a lower bound (even of zero).
+                 owners: owners.filter { $0.onDisk > 0 || $0.items.contains { !$0.onDisk.isExact } }.sorted { $0.onDisk > $1.onDisk },
                  coverage: coverage.sorted { $0.area < $1.area }, folders: folders)
     }
 }

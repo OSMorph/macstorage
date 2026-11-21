@@ -22,7 +22,7 @@ public struct Snapshot: Codable, Equatable, Sendable {
 
     /// Space on the Data volume that no owner accounts for.
     public var unattributed: Int64 {
-        let attributed = owners.filter { !$0.isOwnVolume }.map(\.onDisk).reduce(0, +)
+        let attributed = owners.filter { !$0.isOwnVolume }.map(\.hostOnDisk).reduce(0, +)
         return max(0, disk.dataVolumeUsed - attributed)
     }
 

@@ -99,12 +99,15 @@ public struct HistoryStore: Sendable {
     /// The run in full, or nil if only the compact copy survives.
     public func fullRun(_ id: UUID) -> RunRecord? { load(runURL(id)) }
 
-    /// The run's receipt file, written from the full record if it doesn't exist yet. An
-    /// existing receipt is never replaced by one written from a compact copy.
+    /// The run's receipt file. It's written again from the full record when it's missing
+    /// or older than the record; it's never written from a compact copy over a full one.
     public func receipt(_ run: RunRecord) throws -> URL {
         let url = receiptURL(run)
+        let modified = { (u: URL) in (try? FileManager.default.attributesOfItem(atPath: u.path))?[.modificationDate] as? Date }
+        if let receiptDate = modified(url), receiptDate >= (modified(runURL(run.id)) ?? .distantPast) { return url }
+        if let full = fullRun(run.id) { return try writeReceipt(full) }
         if FileManager.default.fileExists(atPath: url.path) { return url }
-        return try writeReceipt(fullRun(run.id) ?? run)
+        return try writeReceipt(run)
     }
 
     /// Keeps at most `limit` approved targets and commands per step, and none of the
@@ -132,7 +135,8 @@ public struct HistoryStore: Sendable {
             .appending(path: "Cleanup \(run.started.formatted(.iso8601).replacingOccurrences(of: ":", with: ".")) \(run.id.uuidString.prefix(8)).txt")
     }
 
-    private func writeReceipt(_ run: RunRecord) throws -> URL {
+    /// Writes a run's receipt and returns where.
+    public func writeReceipt(_ run: RunRecord) throws -> URL {
         let url = receiptURL(run)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Receipt.text(run).write(to: url, atomically: true, encoding: .utf8)

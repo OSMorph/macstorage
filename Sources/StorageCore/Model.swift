@@ -301,11 +301,16 @@ public struct Owner: Codable, Identifiable, Equatable, Sendable {
 
     public var onDisk: Int64 { hostBytes ?? items.compactMap(\.onDisk.bytes).reduce(0, +) }
 
-    /// `onDisk`, marked as a lower bound when an item's size is, or when the VM disk the
-    /// items live in couldn't be measured.
+    /// What the owner takes on the Mac's disk, for disk totals: zero when its VM disk
+    /// couldn't be measured (the sizes inside a VM say nothing reliable about the disk file).
+    public var hostOnDisk: Int64 { hostSizeUnknown == true ? 0 : onDisk }
+
+    /// `onDisk` as shown: unknown when the VM disk couldn't be measured, a lower bound when
+    /// an item's size is.
     public var onDiskMeasure: Measure {
+        if hostSizeUnknown == true { return .unknown }
         guard hostBytes == nil else { return .bytes(onDisk) }
-        let partial = hostSizeUnknown == true || items.contains { if case .atLeast = $0.onDisk { true } else { false } }
+        let partial = items.contains { if case .atLeast = $0.onDisk { true } else { false } }
         return partial ? .atLeast(onDisk) : .bytes(onDisk)
     }
 }

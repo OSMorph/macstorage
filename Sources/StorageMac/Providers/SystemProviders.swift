@@ -151,7 +151,8 @@ public struct LibraryProvider: Provider {
         logFact.targetsComplete = logSize.isComplete
         let logOwner = Owner(id: "logs", name: "Logs", kind: .system, location: "~/Library/Logs", items: [Rules.item(logFact)])
         return ProviderResult(owners: owners + (logBytes > 0 || listed == nil ? [logOwner] : []),
-                              coverage: [CoverageEntry(area: area, status: .measured, detail: "Caches, app data\(ctx.fullDiskAccess ? ", containers" : "") and logs in ~/Library.")])
+                              coverage: [CoverageEntry(area: area, status: .measured, detail: "Caches, app data\(ctx.fullDiskAccess ? ", containers" : "") and logs in ~/Library.")]
+                                  + (listed == nil ? [CoverageEntry(area: "Logs", status: .failed, detail: "~/Library/Logs couldn't be listed, so its size is a lower bound.")] : []))
     }
 
     static let systemServicesKey = "macOS services"

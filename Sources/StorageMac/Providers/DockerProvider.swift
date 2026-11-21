@@ -2,6 +2,7 @@ import Foundation
 import StorageCore
 
 /// Docker-compatible engines reached through `docker` contexts (Docker Desktop, OrbStack, colima).
+/// Podman is measured by `PodmanProvider`, even when a context reaches it.
 /// Engines that aren't running are left alone: the app never starts one.
 public struct DockerProvider: Provider {
     public let area = "Container engines"
@@ -26,6 +27,13 @@ public struct DockerProvider: Provider {
                 continue
             }
             guard seenEngines.insert(engineID).inserted else { continue }
+            // Podman answers Docker's API too (through its Docker socket); its machines are
+            // measured with podman, so they aren't counted twice.
+            if let components = await ctx.output("docker", ["--context", name, "version", "--format", "{{range .Server.Components}}{{.Name}};{{end}}"], timeout: .seconds(10)),
+               components.localizedCaseInsensitiveContains("podman") {
+                result.coverage.append(CoverageEntry(area: "Docker context \(name)", status: .skipped, detail: "Reaches Podman; measured under Podman instead."))
+                continue
+            }
             let engineName = Self.engineName(info.last ?? "", endpoint: endpoint)
             let disk = Self.vmDisk(engineName, context: name, ctx)
             if let disk { seenDisks.insert(disk) }
@@ -83,13 +91,14 @@ public struct DockerProvider: Provider {
     /// What `docker image rm` should be given for these unused images: each tag of a tagged
     /// image (removing every tag removes the image) and the ID of an untagged one, once each.
     /// Each carries the image ID it named at scan time, checked again before removal.
-    static func imageRefs(_ images: [[String: String]]) -> [Target] {
+    /// `size` reads the listed size (Docker prints "1.2GB", Podman a byte count).
+    static func imageRefs(_ images: [[String: String]], size: (String) -> Int64? = Parse.dockerSize) -> [Target] {
         var seen = Set<String>()
         return images.compactMap { img in
             let repo = img["Repository"] ?? "<none>", tag = img["Tag"] ?? "<none>", id = img["ID"] ?? ""
             let ref = repo == "<none>" || tag == "<none>" ? id : "\(repo):\(tag)"
             guard !ref.isEmpty, !id.isEmpty, seen.insert(ref).inserted else { return nil }
-            return Target(ref, bytes: Parse.dockerSize(img["Size"] ?? ""), fingerprint: id)
+            return Target(ref, bytes: size(img["Size"] ?? ""), fingerprint: id)
         }
     }
 

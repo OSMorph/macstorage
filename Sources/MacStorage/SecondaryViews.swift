@@ -291,7 +291,7 @@ struct CleanupsLog: View {
                         Text(run.started.formatted(date: .abbreviated, time: .shortened))
                         Text(run.summaryText).foregroundStyle(.secondary)
                         Spacer()
-                        Text("\(freedText(run, .mac)) freed · \(run.stillInTrash.bytesText) in the Trash · \(freedText(run, .containerDisk)) in Docker's disk")
+                        Text("\(freedText(run, .mac)) freed · \(run.stillInTrash.bytesText) in the Trash · \(freedText(run, .containerDisk)) inside container VMs")
                             .monospacedDigit().foregroundStyle(.secondary)
                         Button(open.contains(run.id) ? "Hide receipt" : "View receipt") { toggle(run.id) }.buttonStyle(.link)
                     }
@@ -386,7 +386,7 @@ struct CleanupView: View {
                 }
                 Divider()
                 HStack {
-                    Text("\(plural(plan.steps.count, "step")) · \(plan.expectedText(.mac)) right away, \(plan.expectedText(.trash)) after emptying the Trash, \(plan.expectedText(.containerDisk)) inside Docker's disk")
+                    Text("\(plural(plan.steps.count, "step")) · \(plan.expectedText(.mac)) right away, \(plan.expectedText(.trash)) after emptying the Trash, \(plan.expectedText(.containerDisk)) inside container VMs")
                         .foregroundStyle(.secondary)
                     Spacer()
                     if let why = model.cleanupBlocked {

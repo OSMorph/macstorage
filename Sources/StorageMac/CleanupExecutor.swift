@@ -111,7 +111,13 @@ public struct CleanupExecutor: Sendable {
                 return "The Docker context no longer reaches the engine you reviewed, or the engine isn't running."
             }
         }
-        if step.item.kind == .dockerUnusedImages, !(await imagesUnchanged(step)) {
+        if case .podmanConnection(let uri)? = step.item.scopeGuard {
+            guard let (_, selector) = Self.engine(step.item), await PodmanProvider.connectionURI(selector[1], tools: tools) == uri,
+                  let out = try? await tools.run("podman", selector + ["info", "--format", "{{.Host.Hostname}}"], timeout: .seconds(20)), out.succeeded else {
+                return "The Podman connection no longer points at the machine you reviewed, or the machine isn't running."
+            }
+        }
+        if [.dockerUnusedImages, .podmanUnusedImages].contains(step.item.kind), !(await imagesUnchanged(step)) {
             return "An image tag now points at a different image than the one you reviewed, or an image is gone."
         }
         return nil
@@ -119,9 +125,9 @@ public struct CleanupExecutor: Sendable {
 
     /// True when every approved tag or ID still names the image the scan saw.
     private func imagesUnchanged(_ step: CleanupStep) async -> Bool {
-        guard let context = Self.dockerContext(step.item) else { return false }
+        guard let (tool, selector) = Self.engine(step.item) else { return false }
         for batch in stride(from: 0, to: step.approvedTargets.count, by: 500).map({ Array(step.approvedTargets[$0..<min($0 + 500, step.approvedTargets.count)]) }) {
-            guard let out = try? await tools.run("docker", context + ["image", "inspect", "--format", "{{.Id}}"] + batch.map(\.id), timeout: .seconds(120)),
+            guard let out = try? await tools.run(tool, selector + ["image", "inspect", "--format", "{{.Id}}"] + batch.map(\.id), timeout: .seconds(120)),
                   out.succeeded else { return false }
             let ids = out.stdout.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
             guard ids == batch.map({ $0.fingerprint ?? "" }) else { return false }
@@ -129,10 +135,18 @@ public struct CleanupExecutor: Sendable {
         return true
     }
 
+    /// The engine's CLI and how its command picks the engine (`--context <name>` for
+    /// Docker, `--connection <name>` for Podman), from a container item's command.
+    static func engine(_ item: Item) -> (tool: String, selector: [String])? {
+        guard let command = command(of: item), command.arguments.count > 1 else { return nil }
+        let flag = command.arguments[0]
+        guard (command.tool == "docker" && flag == "--context") || (command.tool == "podman" && flag == "--connection") else { return nil }
+        return (command.tool, Array(command.arguments.prefix(2)))
+    }
+
     /// `--context <name>` from a Docker item's command.
     static func dockerContext(_ item: Item) -> [String]? {
-        guard let args = command(of: item)?.arguments, args.first == "--context", args.count > 1 else { return nil }
-        return Array(args.prefix(2))
+        engine(item).flatMap { $0.tool == "docker" ? $0.selector : nil }
     }
 
     /// Clears a tool's folder only if it's still the folder the scan saw, holding nothing
@@ -227,9 +241,9 @@ public struct CleanupExecutor: Sendable {
         switch step.item.kind {
         case .nixDeadPaths:
             return SystemProvider.volumeUsed("/nix")
-        case .dockerBuildCache, .dockerUnusedImages:
-            guard let context = Self.dockerContext(step.item),
-                  let out = try? await tools.run("docker", context + ["system", "df", "--format", "{{json .}}"], timeout: .seconds(120)),
+        case .dockerBuildCache, .dockerUnusedImages, .podmanUnusedImages:
+            guard let (tool, selector) = Self.engine(step.item),
+                  let out = try? await tools.run(tool, selector + ["system", "df", "--format", "{{json .}}"], timeout: .seconds(120)),
                   out.succeeded else { return nil }
             let type = step.item.kind == .dockerBuildCache ? "Build Cache" : "Images"
             return Parse.dockerSystemDF(out.stdout).first { $0.type == type }?.size

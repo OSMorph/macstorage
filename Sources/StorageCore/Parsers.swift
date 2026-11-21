@@ -14,6 +14,25 @@ public enum Parse {
         return nil
     }
 
+    /// A JSON array of objects (`--format json`), with string, number and boolean values
+    /// as strings ("true"/"false" for booleans); nil when it isn't one.
+    public static func jsonArray(_ text: String) -> [[String: String]]? {
+        (try? JSONDecoder().decode([[String: Scalar]].self, from: Data(text.utf8)))?.map { $0.compactMapValues(\.text) }
+    }
+
+    /// A JSON value kept as text when it's a string, number or boolean.
+    private struct Scalar: Decodable {
+        var text: String?
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.singleValueContainer()
+            if let b = try? c.decode(Bool.self) { text = b ? "true" : "false" }
+            else if let i = try? c.decode(Int64.self) { text = String(i) }
+            else if let d = try? c.decode(Double.self) { text = String(d) }
+            else { text = try? c.decode(String.self) }
+        }
+    }
+
     /// One JSON object per line, as printed by `--format '{{json .}}'`. Lines that aren't
     /// valid JSON objects are ignored.
     public static func jsonLines(_ text: String) -> [[String: String]] {
@@ -41,9 +60,10 @@ public enum Parse {
     /// `docker system df --format '{{json .}}'`
     public static func dockerSystemDF(_ text: String) -> [DockerUsage] {
         jsonLines(text).compactMap { row in
-            guard let type = row["Type"], let size = row["Size"].flatMap(dockerSize) else { return nil }
+            // Podman prints exact byte counts too (RawSize); Docker only rounded text.
+            guard let type = row["Type"], let size = row["RawSize"].flatMap({ Int64($0) }) ?? row["Size"].flatMap(dockerSize) else { return nil }
             return DockerUsage(type: type, total: Int(row["TotalCount"] ?? "") ?? 0, active: Int(row["Active"] ?? "") ?? 0,
-                               size: size, reclaimable: row["Reclaimable"].flatMap(dockerSize) ?? 0)
+                               size: size, reclaimable: row["RawReclaimable"].flatMap({ Int64($0) }) ?? row["Reclaimable"].flatMap(dockerSize) ?? 0)
         }
     }
 

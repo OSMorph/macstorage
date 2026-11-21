@@ -62,7 +62,7 @@ public enum Destination: String, Codable, CaseIterable, Sendable {
         switch self {
         case .mac: "Freed on your Mac right away"
         case .trash: "Freed after you empty the Trash"
-        case .containerDisk: "Freed inside Docker's disk"
+        case .containerDisk: "Freed inside container VMs"
         }
     }
 }
@@ -180,6 +180,8 @@ public enum ScopeGuard: Codable, Equatable, Hashable, Sendable {
     case folder(FileIdentity)
     /// The Docker context must still reach this engine.
     case dockerEngine(id: String)
+    /// The Podman connection must still point at this address and answer.
+    case podmanConnection(uri: String)
 }
 
 /// Identifies one filesystem object: the same path holding a different or modified object

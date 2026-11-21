@@ -72,7 +72,7 @@ extension Destination {
         switch self {
         case .mac: "now"
         case .trash: "via Trash"
-        case .containerDisk: "in Docker's disk"
+        case .containerDisk: "in a container VM"
         }
     }
 }

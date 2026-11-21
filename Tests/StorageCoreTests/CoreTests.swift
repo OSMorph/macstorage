@@ -13,11 +13,21 @@ final class RulesTests: XCTestCase {
     }
 
     func testIrreversibleDockerDeletesAreHandedToTheUser() {
-        for kind in [ItemKind.dockerUnusedVolumes, .dockerStoppedContainers] {
+        for kind in [ItemKind.dockerUnusedVolumes, .dockerStoppedContainers, .podmanUnusedVolumes, .podmanStoppedContainers] {
             let item = Rules.item(Fact(kind, onDisk: .bytes(1), targets: [Target("a"), Target("b")]))
             guard case .userRunsCommand(let cmd, _) = item.action else { return XCTFail("\(kind) not handed over") }
             XCTAssertTrue(cmd.hasSuffix(" a b"), "command lists every target: \(cmd)")
         }
+    }
+
+    func testPodmanCommandsNameTheirConnection() {
+        let images = Rules.item(Fact(.podmanUnusedImages, onDisk: .bytes(2), reclaimable: .bytes(1), targets: [Target("app:1")], root: "dev"))
+        guard case .runOnTargets(let command, .containerDisk) = images.action else { return XCTFail("\(images.action)") }
+        XCTAssertEqual(command, Command("podman", ["--connection", "dev", "image", "rm"]))
+        XCTAssertTrue(images.reclaimableIsUpperBound, "images share layers")
+        let volumes = Rules.item(Fact(.podmanUnusedVolumes, onDisk: .bytes(1), targets: [Target("v")], root: "dev"))
+        guard case .userRunsCommand(let cmd, false) = volumes.action else { return XCTFail("\(volumes.action)") }
+        XCTAssertEqual(cmd, "podman --connection dev volume rm v")
     }
 
     func testPnpmIsNotRunBecauseItsScopeIsUnknownInAdvance() {
@@ -488,6 +498,23 @@ final class ParserTests: XCTestCase {
     func fixture(_ name: String) throws -> String {
         let url = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures"))
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    func testJSONArraysKeepBooleansAndNumbersAsText() {
+        let rows = Parse.jsonArray(#"[{"Name":"dev","Running":true,"Port":52123,"Tags":["x"]},{"Name":"old","Running":false}]"#)
+        XCTAssertEqual(rows?.first?["Running"], "true")
+        XCTAssertEqual(rows?.first?["Port"], "52123")
+        XCTAssertNil(rows?.first?["Tags"], "arrays are left out")
+        XCTAssertEqual(rows?.last?["Running"], "false")
+        XCTAssertNil(Parse.jsonArray("not json"))
+    }
+
+    func testPodmanSystemDFUsesExactBytes() {
+        let df = #"{"Type":"Images","Total":15,"Active":6,"RawSize":6100000123,"RawReclaimable":3800000456,"TotalCount":15,"Size":"6.1GB","Reclaimable":"3.8GB (62%)"}"#
+        let usage = Parse.dockerSystemDF(df)
+        XCTAssertEqual(usage.first?.size, 6_100_000_123)
+        XCTAssertEqual(usage.first?.reclaimable, 3_800_000_456)
+        XCTAssertEqual(usage.first?.total, 15)
     }
 
     func testDockerSizes() {

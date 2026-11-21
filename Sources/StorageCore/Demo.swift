@@ -23,6 +23,7 @@ public enum Demo {
             Owner(id: id, name: name, kind: kind, location: location, note: note, isOwnVolume: ownVolume, hostBytes: hostBytes, items: facts.map(Rules.item))
         }
         let dockerData = "~/Library/Containers/com.docker.docker/Data/vms/0/data"
+        let podmanData = "~/.local/share/containers/podman/machine/applehv"
         let pkgs = ["openssl", "python3", "nodejs", "go", "llvm", "git", "curl", "sqlite", "zlib", "cmake", "rustc", "ffmpeg"]
         let owners = [
             owner("downloads", "Downloads", .personalFiles, "~/Downloads", [
@@ -44,6 +45,16 @@ public enum Demo {
                 Fact(.dockerStoppedContainers, onDisk: .bytes(110_000_000), targets: list(31, { "api-\($0 + 1)" }, bytes: 40_000_000), root: "desktop-linux", path: dockerData, counts: ["stopped": 31, "total": 58]),
                 Fact(.dockerUnusedVolumes, onDisk: .bytes(gb(3)), targets: list(20, { "pgdata-\(hex($0 + 3000, 6))" }, bytes: gb(2.1)), root: "desktop-linux", path: dockerData, counts: ["unused": 20, "total": 25]),
                 Fact(.dockerDiskSlack, onDisk: .bytes(gb(14.4)), path: dockerData),
+            ]),
+            owner("podman:podman-machine-default", "Podman", .developerTools, "~/.local/share/containers/podman/machine/applehv",
+                  note: "One VM disk file, podman-machine-default-arm64.raw: 100 GB logical, 9.4 GB on disk.", hostBytes: gb(9.4), [
+                Fact(.podmanUnusedImages, key: "podman-machine-default", onDisk: .bytes(gb(6.1)), reclaimable: .bytes(gb(3.8)),
+                     targets: list(9, { "localhost/service-\($0 + 1):dev" }, bytes: gb(3.8)), root: "podman-machine-default", path: podmanData, counts: ["unused": 9, "total": 15]),
+                Fact(.podmanStoppedContainers, key: "podman-machine-default", onDisk: .bytes(60_000_000), targets: list(4, { "worker-\($0 + 1)" }, bytes: 20_000_000),
+                     root: "podman-machine-default", path: podmanData, counts: ["stopped": 4, "total": 6]),
+                Fact(.podmanUnusedVolumes, key: "podman-machine-default", onDisk: .bytes(gb(1.6)), targets: list(2, { "cache-\(hex($0 + 4000, 6))" }, bytes: gb(0.9)),
+                     root: "podman-machine-default", path: podmanData, counts: ["unused": 2, "total": 5]),
+                Fact(.dockerDiskSlack, onDisk: .bytes(gb(1.6)), path: podmanData),
             ]),
             owner("slack", "Slack", .apps, "~/Library/Containers/com.tinyspeck.slackmacgap", [
                 Fact(.appCache, key: "slack", onDisk: .bytes(gb(3.2)), targets: [Target("~/Library/Containers/com.tinyspeck.slackmacgap/Data/Library/Caches", bytes: gb(3.2))]),
@@ -83,6 +94,7 @@ public enum Demo {
         let coverage = [
             CoverageEntry(area: "Full Disk Access", status: .measured, detail: "Granted."),
             CoverageEntry(area: "Docker Desktop", status: .measured, detail: "Running. Two Docker contexts point to the same engine, so it was counted once.", seconds: 4),
+            CoverageEntry(area: "Podman", status: .measured, detail: "Running; measured through the podman-machine-default connection.", seconds: 3),
             CoverageEntry(area: "Nix", status: .measured, detail: "Dead paths sized; old generations not measured yet (takes about 30 s).", seconds: 16),
             CoverageEntry(area: "Xcode", status: .skipped, detail: "Not installed (Command Line Tools only)."),
             CoverageEntry(area: "Home folder and Library", status: .measured, detail: "All folders measured.", seconds: 187),

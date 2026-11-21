@@ -24,7 +24,7 @@ struct OverviewView: View {
                     }
                     Text("Biggest owners").font(.headline)
                     OwnerRanking(model: model, snapshot: s, accounting: acc)
-                    Text("In each bar, the solid part is what cleaning up gives back on your Mac (safe and probably-safe items, right away or via the Trash) and the faded part is the rest. Space freed inside Docker's disk isn't drawn: the disk file shrinks later. On disk counts a hard-linked file once within each folder measured; blocks shared between APFS clones count in each copy, and the shared part is noted per item.")
+                    Text("In each bar, the solid part is what cleaning up gives back on your Mac (safe and probably-safe items, right away or via the Trash) and the faded part is the rest. Space freed inside a container engine's VM isn't drawn: its disk file shrinks later. On disk counts a hard-linked file once within each folder measured; blocks shared between APFS clones count in each copy, and the shared part is noted per item.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(20)
@@ -118,7 +118,7 @@ struct Tile<Title: View>: View {
     }
 }
 
-/// Safe and Probably safe: right away and after the Trash at the same weight, Docker's disk apart.
+/// Safe and Probably safe: right away and after the Trash at the same weight, container VMs apart.
 struct TierTile: View {
     let tier: Tier
     let accounting: Accounting
@@ -130,7 +130,7 @@ struct TierTile: View {
         let unmeasured = accounting.unmeasuredCount(tier: tier)
         // Lead with the largest destination; the others follow, never added to it.
         let order = Destination.allCases.sorted { r[$0] != r[$1] ? r[$0] > r[$1] : Destination.allCases.firstIndex(of: $0)! < Destination.allCases.firstIndex(of: $1)! }
-        let phrase: [Destination: String] = [.mac: "right away", .trash: "after emptying the Trash", .containerDisk: "inside Docker's disk"]
+        let phrase: [Destination: String] = [.mac: "right away", .trash: "after emptying the Trash", .containerDisk: "inside container VMs"]
         let bound = { (d: Destination) in r.boundPrefix(d) + formatBytes(r[d]) }
         let extras = (userRun > 0 ? " \(plural(userRun, "item")) you run yourself." : "") + (unmeasured > 0 ? " \(unmeasured) not measured yet." : "")
         if r.byDestination.values.allSatisfy({ $0 == 0 }) {

@@ -95,7 +95,7 @@ struct ItemTable: View {
                     HStack(spacing: 4) {
                         if i.reclaimableIsUpperBound { Text("at most") }
                         MeasureText(measure: i.reclaimable)
-                        if i.action.destination == .containerDisk { Text("in Docker's disk").font(.caption2).foregroundStyle(.secondary) }
+                        if i.action.destination == .containerDisk { Text("in a container VM").font(.caption2).foregroundStyle(.secondary) }
                     }
                 }
             }.width(170)

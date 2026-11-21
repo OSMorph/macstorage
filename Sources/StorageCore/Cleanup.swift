@@ -306,7 +306,7 @@ extension ItemKind {
         switch self {
         case .nixDeadPaths: "as the change in the whole /nix volume"
         case .dockerBuildCache: "as the change in the engine's whole build cache"
-        case .dockerUnusedImages: "as the change in all the engine's images"
+        case .dockerUnusedImages, .podmanUnusedImages: "as the change in all the engine's images"
         default: nil
         }
     }
@@ -320,7 +320,7 @@ public enum Receipt {
                      "Started \(run.started.formatted(date: .abbreviated, time: .shortened)): \(run.summaryText)", ""]
         for r in run.steps {
             let s = r.step, title = "\(s.ownerName) · \(s.item.name)"
-            let freed = { (m: Int64?) in m.map { "\(ByteFormat.string($0)) \(s.destination == .trash ? "moved to the Trash" : s.destination == .containerDisk ? "freed inside Docker's disk" : "freed"), measured" + (s.item.kind.measurementNote.map { " " + $0 } ?? "") }
+            let freed = { (m: Int64?) in m.map { "\(ByteFormat.string($0)) \(s.destination == .trash ? "moved to the Trash" : s.destination == .containerDisk ? "freed inside a container VM" : "freed"), measured" + (s.item.kind.measurementNote.map { " " + $0 } ?? "") }
                 ?? "predicted \(s.expectedText), not re-measured" }
             switch r.outcome {
             case .done(let m): lines.append("\(r.leftAlone.isEmpty ? "DONE" : "PARTLY DONE (some left alone)") · \(title) · \(freed(m))" + (m == nil ? "" : " (predicted \(s.expectedText))"))

@@ -47,6 +47,7 @@ public struct Fact: Sendable {
 public enum ItemKind: String, Codable, CaseIterable, Sendable {
     case nixDeadPaths, nixOldGenerations, nixLive
     case dockerBuildCache, dockerUnusedImages, dockerStoppedContainers, dockerUnusedVolumes, dockerDiskSlack, dockerVMDisk
+    case podmanUnusedImages, podmanStoppedContainers, podmanUnusedVolumes, podmanVMDisk
     case goModuleCache, goBuildCache
     case cargoRegistry, rustupToolchains, gradleCaches, mavenRepository
     case npmCache, pnpmStore, voltaToolchains
@@ -76,7 +77,7 @@ public enum Rules {
         return Item(id: f.key.isEmpty ? f.kind.rawValue : "\(f.kind.rawValue):\(f.key)", kind: f.kind,
                     name: f.name ?? r.name, onDisk: f.onDisk, sharedBytes: f.sharedBytes,
                     reclaimable: r.tier == .review ? .unknown : reclaimable,
-                    reclaimableIsUpperBound: f.kind == .pnpmStore || f.kind == .dockerUnusedImages, tier: r.tier,
+                    reclaimableIsUpperBound: [.pnpmStore, .dockerUnusedImages, .podmanUnusedImages].contains(f.kind), tier: r.tier,
                     explanation: r.why, basis: f.targetsComplete ? r.basis : (r.basis.map { $0 + " " } ?? "") + "The list is incomplete (the scan stopped early or some folders couldn't be read).",
                     action: action, targets: f.targets, targetUnit: r.unit, targetsComplete: f.targetsComplete,
                     path: f.path, appBundleID: f.appBundleID, scopeGuard: f.scopeGuard)
@@ -98,6 +99,7 @@ public enum Rules {
     static func rule(for f: Fact) -> Rule {
         let root = f.root ?? ""
         let docker = { (args: [String]) in Command("docker", (f.root.map { ["--context", $0] } ?? []) + args) }
+        let podman = { (args: [String]) in Command("podman", (f.root.map { ["--connection", $0] } ?? []) + args) }
         switch f.kind {
         case .nixDeadPaths:
             return Rule(name: "Dead store paths", tier: .safe,
@@ -149,7 +151,23 @@ public enum Rules {
                         action: .userActsInApp("Delete folders of artifacts you no longer build against in Finder"))
         case .dockerDiskSlack:
             return Rule(name: "VM disk space not used by contents", tier: .notRemovable,
-                        why: "The VM disk holds more than its contents add up to. The difference is space Docker hasn't handed back to macOS yet; the disk file shrinks when Docker trims it.")
+                        why: "The VM disk holds more than its contents add up to. The difference is space the engine hasn't handed back to macOS yet; the disk file shrinks when the engine trims it.")
+        case .podmanUnusedImages:
+            return Rule(name: "Images no container uses", tier: .probablySafe,
+                        why: "\(f.count("unused")) of \(f.count("total")) images have no container, running or stopped. They download or rebuild when needed. The app removes exactly the approved names (or IDs for untagged images); Podman refuses any image a container has started using since.",
+                        basis: "Right before running, the app checks that each name still points at the image you reviewed and that the connection still reaches the same machine, and skips the step if not. Images share layers, so the space freed is at most the figure shown.",
+                        action: .runOnTargets(podman(["image", "rm"]), .containerDisk), unit: "image")
+        case .podmanStoppedContainers:
+            return Rule(name: "Stopped containers", tier: .review,
+                        why: "\(f.count("stopped")) of \(f.count("total")) containers are stopped. A stopped container can still hold files written inside it, and Podman deletes containers immediately, so the app never removes them for you: check the list and run the command yourself.",
+                        action: .userRunsCommand(([podman(["rm"]).display()] + f.targets.map(\.id)).joined(separator: " "), needsAdmin: false), unit: "container")
+        case .podmanUnusedVolumes:
+            return Rule(name: "Volumes no container uses", tier: .review,
+                        why: "\(f.count("unused")) of \(f.count("total")) volumes aren't attached to a container. Volumes often hold databases, and Podman deletes them immediately, so the app never removes them for you: check the list and run the command yourself.",
+                        action: .userRunsCommand(([podman(["volume", "rm"]).display()] + f.targets.map(\.id)).joined(separator: " "), needsAdmin: false), unit: "volume")
+        case .podmanVMDisk:
+            return Rule(name: "VM disk (machine not running)", tier: .leaveAlone,
+                        why: "The Podman machine isn't running, so the app can't see what's inside its disk, and it never starts a machine itself. Start it and scan again to see its images and volumes.")
         case .goModuleCache:
             return Rule(name: "Module cache", tier: .safe, why: "Downloaded module sources. Go downloads them again on the next build.",
                         basis: rootCheck, action: .clearFolder(Command("go", ["clean", "-modcache"]), root: root, .mac), unit: "module version")

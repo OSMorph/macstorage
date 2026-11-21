@@ -100,7 +100,7 @@ public struct Scanner: Sendable {
     }
 
     public static let standardProviders: [any Provider] = [
-        SystemProvider(), DockerProvider(), NixProvider(), LanguageCachesProvider(), HomebrewProvider(),
+        SystemProvider(), DockerProvider(), PodmanProvider(), NixProvider(), LanguageCachesProvider(), HomebrewProvider(),
         XcodeProvider(), LibraryProvider(), PersonalFilesProvider(), GitProvider(),
     ]
 

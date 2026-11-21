@@ -127,7 +127,7 @@ struct StepPreview: View {
 
     private var warnings: [String] {
         switch step.destination {
-        case .containerDisk: ["Frees space inside Docker's disk. The disk file on your Mac shrinks when Docker trims it, not right away."]
+        case .containerDisk: ["Frees space inside a container engine's VM. Its disk file on your Mac shrinks when the engine trims it, not right away."]
         case .trash: ["Goes to the Trash. The space comes back when you empty it; the results offer to delete just these items."]
         case .mac: []
         }
@@ -306,7 +306,7 @@ struct ResultsPhase: View {
         return [
             (freedText(run, .mac), deleted.isEmpty ? "Freed on your Mac" : "Freed on your Mac, including \(deleted.bytesText) deleted from the Trash", detail(.mac)),
             (inTrash.bytesText, "Now in the Trash (\(plural(inTrash.count, "item"))), freed when you empty it", detail(.trash)),
-            (freedText(run, .containerDisk), "Freed inside Docker's disk; the disk file shrinks later", detail(.containerDisk)),
+            (freedText(run, .containerDisk), "Freed inside container VMs; their disk files shrink later", detail(.containerDisk)),
         ]
     }
 

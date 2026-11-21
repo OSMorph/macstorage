@@ -361,6 +361,103 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertEqual(refs.map(\.fingerprint), ["sha256:a", "sha256:b"])
     }
 
+    // MARK: Podman
+
+    func podmanImagesStep(_ targets: [Target]) -> CleanupStep {
+        var s = step(targets, action: .runOnTargets(Command("podman", ["--connection", "dev", "image", "rm"]), .containerDisk), kind: .podmanUnusedImages)
+        s.item.scopeGuard = .podmanConnection(uri: "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock")
+        return s
+    }
+
+    func podmanTools(uri: String, images: String) -> FakeTools {
+        FakeTools([
+            { $0.contains("connection list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","URI":"\#(uri)","IsMachine":true}]"#) : nil },
+            { $0.contains(" info ") ? ToolOutput(status: 0, stdout: "localhost\n") : nil },
+            { $0.contains("image inspect") ? ToolOutput(status: 0, stdout: images) : nil },
+        ])
+    }
+
+    func testPodmanImagesAreRemovedThroughTheirConnection() async {
+        let tools = podmanTools(uri: "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock", images: "aaa\n")
+        let result = await executor(tools).perform(podmanImagesStep([Target("localhost/app:1", fingerprint: "aaa")]), previewTime: .now)
+        XCTAssertTrue(result.outcome.isDone, "\(result.outcome)")
+        XCTAssertTrue(tools.calls.contains("podman --connection dev image rm localhost/app:1"))
+    }
+
+    func testAPodmanConnectionPointingElsewhereIsRefused() async {
+        let tools = podmanTools(uri: "ssh://core@127.0.0.1:60000/run/user/501/podman/podman.sock", images: "aaa\n")
+        let result = await executor(tools).perform(podmanImagesStep([Target("localhost/app:1", fingerprint: "aaa")]), previewTime: .now)
+        guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertFalse(tools.calls.contains { $0.contains("image rm") })
+    }
+
+    func testARetaggedPodmanImageIsNotRemoved() async {
+        let tools = podmanTools(uri: "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock", images: "bbb\n")
+        let result = await executor(tools).perform(podmanImagesStep([Target("localhost/app:1", fingerprint: "aaa")]), previewTime: .now)
+        guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertFalse(tools.calls.contains { $0.contains("image rm") })
+    }
+
+    func testAPodmanMachineIsMeasuredThroughItsConnection() async throws {
+        let home = FileManager.default.temporaryDirectory.appending(path: "podman-home-\(UUID().uuidString)")
+        let machines = home.appending(path: ".local/share/containers/podman/machine/applehv")
+        try FileManager.default.createDirectory(at: machines, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        FileManager.default.createFile(atPath: machines.appending(path: "dev-arm64.raw").path, contents: Data(repeating: 1, count: 1 << 20))
+        FileManager.default.createFile(atPath: machines.appending(path: "dev-2-arm64.raw").path, contents: Data(repeating: 1, count: 2 << 20))
+        let tools = FakeTools([
+            { $0.hasSuffix("machine list --format json") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev*","Running":true,"VMType":"applehv"},{"Name":"dev-2","Running":false,"VMType":"applehv"}]"#) : nil },
+            { $0.contains("connection list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","URI":"ssh://a/podman.sock"},{"Name":"dev-root","URI":"ssh://a/root.sock"},{"Name":"dev-2","URI":"ssh://b/podman.sock"}]"#) : nil },
+            { $0.hasPrefix("podman --connection dev system df") ? ToolOutput(status: 0, stdout: #"{"Type":"Images","TotalCount":3,"Active":1,"RawSize":3000,"RawReclaimable":2000}"#) : nil },
+            { $0.hasPrefix("podman --connection dev images") ? ToolOutput(status: 0, stdout: [
+                #"{"repository":"localhost/app","tag":"1","Id":"aaa","Size":1000,"Containers":0}"#,
+                #"{"repository":"localhost/app","tag":"latest","Id":"aaa","Size":1000,"Containers":0}"#,
+                #"{"repository":"<none>","tag":"<none>","Id":"bbb","Size":1500,"Containers":0}"#,
+                #"{"repository":"docker.io/library/db","tag":"16","Id":"ccc","Size":500,"Containers":1}"#,
+            ].joined(separator: "\n")) : nil },
+            { $0.hasPrefix("podman --connection dev ps") ? ToolOutput(status: 0, stdout: "web\trunning\nold-job\texited\n") : nil },
+            { $0.hasPrefix("podman --connection dev volume") ? ToolOutput(status: 0, stdout: "scratch\n") : nil },
+            // The rootful store is empty: nothing from it is shown.
+            { $0.hasPrefix("podman --connection dev-root system df") ? ToolOutput(status: 0, stdout: #"{"Type":"Images","TotalCount":0,"Active":0,"RawSize":0,"RawReclaimable":0}"#) : nil },
+        ])
+        let result = await PodmanProvider().scan(ScanContext(tools: tools, home: home.path, fullDiskAccess: true))
+        let running = try XCTUnwrap(result.owners.first { $0.id == "podman:dev" })
+        XCTAssertEqual(running.name, "Podman (dev)")
+        XCTAssertEqual(running.location, "~/.local/share/containers/podman/machine/applehv")
+        XCTAssertGreaterThanOrEqual(running.hostBytes ?? 0, 1 << 20, "its own disk, not dev-2's")
+        XCTAssertLessThan(running.hostBytes ?? 0, 2 << 20)
+        let images = try XCTUnwrap(running.items.first { $0.kind == .podmanUnusedImages })
+        XCTAssertEqual(images.targets.map(\.id), ["localhost/app:1", "localhost/app:latest", "bbb"])
+        XCTAssertEqual(images.targets.map(\.fingerprint), ["aaa", "aaa", "bbb"])
+        XCTAssertEqual(images.reclaimable, .bytes(2000), "capped at what Podman says is reclaimable")
+        XCTAssertEqual(images.scopeGuard, .podmanConnection(uri: "ssh://a/podman.sock"))
+        XCTAssertEqual(running.items.first { $0.kind == .podmanStoppedContainers }?.targets.map(\.id), ["old-job"])
+        XCTAssertEqual(running.items.first { $0.kind == .podmanUnusedVolumes }?.targets.map(\.id), ["scratch"])
+        XCTAssertFalse(running.items.contains { $0.name.contains("rootful") })
+        let stopped = try XCTUnwrap(result.owners.first { $0.id == "podman:dev-2" })
+        XCTAssertEqual(stopped.items.map(\.kind), [.podmanVMDisk])
+        XCTAssertFalse(tools.calls.contains { $0.contains("dev-2 ") && !$0.contains("connection list") }, "a stopped machine is never asked")
+        XCTAssertFalse(tools.calls.contains { $0.contains("machine start") })
+    }
+
+    func testPodmanDiskNamesMatchTheirMachine() {
+        XCTAssertTrue(PodmanProvider.isDisk("podman-machine-default-arm64.raw", of: "podman-machine-default"))
+        XCTAssertTrue(PodmanProvider.isDisk("podman-machine-default_fedora-coreos-40-qemu.x86_64.qcow2", of: "podman-machine-default"))
+        XCTAssertFalse(PodmanProvider.isDisk("podman-machine-default-arm64.json", of: "podman-machine-default"))
+        XCTAssertFalse(PodmanProvider.isDisk("dev-2-arm64.raw", of: "dev", others: ["dev", "dev-2"]))
+    }
+
+    func testADockerContextThatReachesPodmanIsLeftToPodman() async {
+        let tools = FakeTools([
+            { $0.contains("context ls") ? ToolOutput(status: 0, stdout: #"{"Name":"default","DockerEndpoint":"unix:///var/run/docker.sock"}"#) : nil },
+            { $0.contains(" info ") ? ToolOutput(status: 0, stdout: "ID1\tfedora\n") : nil },
+            { $0.contains(" version ") ? ToolOutput(status: 0, stdout: "Podman Engine;\n") : nil },
+        ])
+        let result = await DockerProvider().scan(ScanContext(tools: tools, home: NSTemporaryDirectory(), fullDiskAccess: true))
+        XCTAssertTrue(result.owners.isEmpty, "not counted twice")
+        XCTAssertTrue(result.coverage.contains { $0.detail.contains("Podman") })
+    }
+
     // MARK: Folder binding
 
     func cacheStep(_ folder: URL) throws -> CleanupStep {

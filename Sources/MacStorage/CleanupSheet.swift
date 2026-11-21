@@ -333,7 +333,12 @@ struct ResultsPhase: View {
                 }
                 if !caches.isEmpty {
                     DisclosureGroup("\(plural(caches.count, "rebuildable cache item")) (\(caches.bytesText))") {
-                        TargetList(targets: caches.map { Target($0.original, bytes: $0.bytes) }, unit: "item")
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 1) {
+                                ForEach(caches, id: \.landed) { Text("\($0.original) · \([$0].bytesText)").font(.system(.caption, design: .monospaced)) }
+                            }
+                        }
+                        .frame(maxHeight: 120)
                     }
                 }
                 HStack {

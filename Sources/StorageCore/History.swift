@@ -129,3 +129,23 @@ public enum ByteFormat {
         }
     }
 }
+
+/// A measured value in a series, with the segment it belongs to: a nil value (not
+/// measured) ends a segment, so charts don't draw a line across it.
+public struct SeriesPoint: Equatable, Sendable {
+    public var index: Int
+    public var value: Int64
+    public var segment: Int
+    /// The only measured value in its segment: drawn as a point.
+    public var isAlone: Bool
+}
+
+public func segmented(_ values: [Int64?]) -> [SeriesPoint] {
+    var points: [SeriesPoint] = [], segment = 0
+    for (i, v) in values.enumerated() {
+        guard let v else { segment += 1; continue }
+        points.append(SeriesPoint(index: i, value: v, segment: segment, isAlone: false))
+    }
+    let sizes = Dictionary(grouping: points, by: \.segment).mapValues(\.count)
+    return points.map { var p = $0; p.isAlone = sizes[p.segment] == 1; return p }
+}

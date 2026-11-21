@@ -302,6 +302,19 @@ final class RunRecordTests: XCTestCase {
         run.steps[run.steps.count - 1].step.item.id = "go/other"
         run.steps[run.steps.count - 1].outcome = .done(measured: nil)
         XCTAssertEqual(run.freedText(.mac), "≥ 1.0 GB + ≈ 10.0 GB estimated", "minimum only over measured bytes")
+        run.steps.removeLast()
+        run.trashDeletions = [.init(date: Demo.scanDate, deleted: [TrashEntry(original: "~/b", landed: "/t/b", identity: nil, bytes: 0, picked: false, isEstimate: true)], refused: [])]
+        XCTAssertEqual(run.freedText(.mac), "1.0 GB + ≈ 0 bytes estimated", "an estimated zero keeps its qualifier")
+        run.steps[go].outcome = .done(measured: 0)
+        XCTAssertEqual(run.freedText(.mac), "≈ 0 bytes")
+    }
+
+    func testSeriesBreakAtUnmeasuredScans() {
+        let points = segmented([5, 6, nil, 9, nil, nil, 4, 2])
+        XCTAssertEqual(points.map(\.index), [0, 1, 3, 6, 7])
+        XCTAssertEqual(Set(points.map(\.segment)).count, 3, "no line across a gap")
+        XCTAssertEqual(points.filter(\.isAlone).map(\.index), [3], "a lone measured scan is a point")
+        XCTAssertTrue(segmented([nil, nil]).isEmpty)
     }
 
     func testTrashDeletionIsItsOwnEventAndOnlyCountsDeletedEntries() {

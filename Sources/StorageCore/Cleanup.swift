@@ -283,11 +283,11 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
     public func freedText(_ d: Destination) -> String {
         let deleted = d == .mac ? trashDeletions.flatMap(\.deleted) : []
         let exact = freed(d) + deleted.filter { !$0.isEstimate }.map(\.bytes).reduce(0, +)
-        let estimated = deleted.filter(\.isEstimate).map(\.bytes).reduce(0, +)
+        let estimates = deleted.filter(\.isEstimate), estimated = estimates.map(\.bytes).reduce(0, +)
         let unmeasured = unmeasuredCount(d) > 0
         var parts: [String] = []
-        if exact > 0 || (estimated == 0 && !unmeasured) { parts.append((unmeasured ? "≥ " : "") + ByteFormat.string(exact)) }
-        if estimated > 0 { parts.append("≈ \(ByteFormat.string(estimated))" + (parts.isEmpty && !unmeasured ? "" : " estimated")) }
+        if exact > 0 || (estimates.isEmpty && !unmeasured) { parts.append((unmeasured ? "≥ " : "") + ByteFormat.string(exact)) }
+        if !estimates.isEmpty { parts.append("≈ \(ByteFormat.string(estimated))" + (parts.isEmpty && !unmeasured ? "" : " estimated")) }
         if unmeasured, exact == 0 { parts.append(parts.isEmpty ? "Not re-measured" : "the rest not re-measured") }
         return parts.joined(separator: parts.count == 2 && unmeasured && exact == 0 ? ", " : " + ")
     }

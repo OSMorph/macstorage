@@ -21,7 +21,7 @@ public struct PodmanProvider: Provider {
         if !allProviders {
             // Older Podman lists one provider's machines: other providers' disks are shown
             // as files, never asked about.
-            result = Self.unlistedDisks(listed: machines.compactMap { $0["Name"] }, ctx)
+            result = Self.unlistedDisks(listed: machines.compactMap { m in m["Name"].map { ($0, m["VMType"] ?? "") } }, ctx)
         }
         guard !machines.isEmpty else {
             result.coverage.append(CoverageEntry(area: area, status: .skipped, detail: "Podman has no machine on this Mac."))
@@ -29,6 +29,7 @@ public struct PodmanProvider: Provider {
         }
         let connections = Self.connections(await ctx.output("podman", ["system", "connection", "list", "--format", "json"]) ?? "")
         // `podman machine list` marks the default machine with "*" in some versions.
+        var seen = Set<String>()
         let named = machines.compactMap { m in m["Name"].map { (machine: m, name: $0.hasSuffix("*") ? String($0.dropLast()) : $0) } }
         let names = named.map(\.name)
         for (machine, name) in named {
@@ -59,9 +60,16 @@ public struct PodmanProvider: Provider {
             // "-root". Only connections to a machine on this Mac are asked: one with the
             // same name to another host, or a rootful one aliasing the rootless socket, isn't.
             var facts: [Fact] = [], contents: Int64 = 0, problems: [String] = [], asked = Set<String>(), allSized = true
-            for (connection, rootful) in [(name, false), (name + "-root", true)] {
+            for (connection, rootful) in [(name, false), (name + "-root", true)] where connections[connection] != nil {
                 guard let uri = connections[connection].flatMap({ Self.machineURI($0, of: machine, rootful: rootful) }),
-                      asked.insert(Self.destination(uri)).inserted else { continue }
+                      // A destination already measured, for this machine or another, isn't again.
+                      seen.insert(Self.destination(uri)).inserted else {
+                    // A store that exists but can't be asked: its size isn't known.
+                    allSized = false
+                    problems.append("the \(connection) connection doesn't lead to this machine, so its store wasn't asked")
+                    continue
+                }
+                asked.insert(uri)
                 let found = await engine(ctx, connection: connection, uri: uri, machine: name, rootful: rootful)
                 problems += found.problems
                 contents += found.contents ?? 0
@@ -88,7 +96,7 @@ public struct PodmanProvider: Provider {
                                        hostBytes: onMac, hostSizeUnknown: disk == nil, items: facts.map(Rules.item)))
             result.coverage.append(problems.isEmpty
                 ? CoverageEntry(area: title, status: .measured, detail: "Running; measured through the \(name) connection.")
-                : CoverageEntry(area: title, status: .failed, detail: "Running, but couldn't list \(problems.joined(separator: "; ")), so those items aren't shown."))
+                : CoverageEntry(area: title, status: .failed, detail: "Running, but \(problems.joined(separator: "; ")). What those would have listed isn't shown."))
         }
         return result
     }
@@ -98,7 +106,7 @@ public struct PodmanProvider: Provider {
     private func engine(_ ctx: ScanContext, connection: String, uri: String, machine: String, rootful: Bool) async -> (facts: [Fact], contents: Int64?, problems: [String]) {
         let c = ["--connection", connection], label = rootful ? " (rootful)" : ""
         guard let df = await ctx.output("podman", c + ["system", "df", "--format", "{{json .}}"], timeout: .seconds(120)) else {
-            return ([], nil, ["anything through the \(connection) connection (podman system df)"])
+            return ([], nil, ["podman system df didn't answer through \(connection)"])
         }
         let usage = Dictionary(Parse.dockerSystemDF(df).map { ($0.type, $0) }, uniquingKeysWith: { a, _ in a })
         let size = { (type: String) in usage[type].map { Measure.bytes($0.size) } ?? .bytes(0) }
@@ -114,7 +122,7 @@ public struct PodmanProvider: Provider {
             facts.append(Fact(.podmanUnusedImages, key: connection, name: "Images no container uses" + label, onDisk: size("Images"),
                               reclaimable: .bytes(reclaimable), targets: DockerProvider.imageRefs(unused, size: { Int64($0) }), root: connection,
                               counts: ["unused": unique.count, "total": Set(images.compactMap { $0["Id"] }).count]))
-        } else { problems.append("images through \(connection) (podman images)") }
+        } else { problems.append("podman images didn't answer through \(connection)") }
         if let listing = await ctx.output("podman", c + ["ps", "--all", "--format", "{{.Names}}\t{{.State}}\t{{.IsInfra}}"]) {
             let rows = listing.split(whereSeparator: \.isNewline).map { $0.split(separator: "\t").map(String.init) }.filter { $0.count >= 2 }
             // Stopped ones only: not running or paused, and not a pod's infra container
@@ -123,12 +131,12 @@ public struct PodmanProvider: Provider {
             let stopped = containers.filter { ["exited", "created", "stopped", "configured"].contains($0[1]) }.map { Target($0[0]) }
             facts.append(Fact(.podmanStoppedContainers, key: connection, name: "Stopped containers" + label, onDisk: size("Containers"),
                               targets: stopped, root: connection, counts: ["stopped": stopped.count, "total": containers.count]))
-        } else { problems.append("containers through \(connection) (podman ps)") }
+        } else { problems.append("podman ps didn't answer through \(connection)") }
         if let listing = await ctx.output("podman", c + ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}"]) {
             let volumes = listing.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { Target($0) }
             facts.append(Fact(.podmanUnusedVolumes, key: connection, name: "Volumes no container uses" + label, onDisk: size("Local Volumes"),
                               targets: volumes, root: connection, counts: ["unused": volumes.count, "total": usage["Local Volumes"]?.total ?? volumes.count]))
-        } else { problems.append("volumes through \(connection) (podman volume ls)") }
+        } else { problems.append("podman volume ls didn't answer through \(connection)") }
         // Every command is checked against this connection right before it runs.
         for i in facts.indices { facts[i].scopeGuard = .podmanConnection(uri: uri, machine: machine) }
         return (facts, usage.values.map(\.size).reduce(0, +), problems)
@@ -139,24 +147,23 @@ public struct PodmanProvider: Provider {
         Dictionary((Parse.jsonArray(json) ?? []).compactMap { c in c["Name"].map { ($0, c) } }, uniquingKeysWith: { a, _ in a })
     }
 
-    /// The connection's address when it reaches a machine on this Mac: over a local socket
-    /// or SSH to this Mac itself, and not marked as something other than a machine
+    /// The connection's address when it reaches this Mac itself (loopback), and isn't marked
+    /// as something other than a machine
     /// (`IsMachine` is left out when false in some versions, so the address decides).
     /// Nil for anything else.
     static func localMachineURI(_ connection: [String: String]) -> String? {
         guard connection["IsMachine"] != "false", let uri = connection["URI"], let url = URL(string: uri) else { return nil }
-        let local = url.scheme == "unix" || ["127.0.0.1", "localhost", "::1", "[::1]"].contains(url.host ?? "")
-        return local ? uri : nil
+        return ["127.0.0.1", "localhost", "::1", "[::1]"].contains(url.host ?? "") ? uri : nil
     }
 
     /// The connection's address when it's this machine's: local (above), and over SSH to
     /// the machine's own port as its user ("root" for the rootful connection), as
     /// `podman machine list` reports them.
     static func machineURI(_ connection: [String: String], of machine: [String: String], rootful: Bool) -> String? {
-        guard let uri = localMachineURI(connection), let url = URL(string: uri) else { return nil }
-        guard url.scheme == "ssh" else { return uri }
-        if let port = machine["Port"].flatMap(Int.init), url.port != port { return nil }
-        if let user = rootful ? "root" : machine["RemoteUsername"], url.user != user { return nil }
+        // Fails closed: without the machine's port and user to compare, nothing is asked.
+        guard let uri = localMachineURI(connection), let url = URL(string: uri), url.scheme == "ssh",
+              let port = machine["Port"].flatMap(Int.init), url.port == port,
+              let user = rootful ? "root" : machine["RemoteUsername"], url.user == user else { return nil }
         return uri
     }
 
@@ -189,13 +196,16 @@ public struct PodmanProvider: Provider {
 
     /// Disk files of machines `podman machine list` didn't mention (another provider's,
     /// on Podman before 5.3), as owners with their disk only.
-    static func unlistedDisks(listed: [String], _ ctx: ScanContext) -> ProviderResult {
+    static func unlistedDisks(listed: [(name: String, vmType: String)], _ ctx: ScanContext) -> ProviderResult {
         let root = ctx.expand("~/.local/share/containers/podman/machine")
         var result = ProviderResult()
         for type in (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? [] {
             let folder = root + "/" + type
+            // A listed machine claims disks in its own provider's folder only: "dev" under
+            // applehv says nothing about a "dev" disk under qemu.
+            let here = listed.filter { $0.vmType.isEmpty || $0.vmType == type }.map { $0.name.hasSuffix("*") ? String($0.name.dropLast()) : $0.name }
             for file in (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
-            where ["raw", "img", "qcow2"].contains((file as NSString).pathExtension) && !listed.contains(where: { isDisk(file, of: $0.hasSuffix("*") ? String($0.dropLast()) : $0, others: listed) }) {
+            where ["raw", "img", "qcow2"].contains((file as NSString).pathExtension) && !here.contains(where: { isDisk(file, of: $0, others: here) }) {
                 let path = folder + "/" + file, onMac = FileSizes.measure(path).allocated
                 // Machine disks are gigabytes; a small stray image file isn't one.
                 guard onMac >= 100_000_000 else { continue }

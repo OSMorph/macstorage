@@ -27,8 +27,9 @@ public struct PodmanProvider: Provider {
         let connections = Self.connections(await ctx.output("podman", ["system", "connection", "list", "--format", "json"]) ?? "")
         var result = ProviderResult()
         // `podman machine list` marks the default machine with "*" in some versions.
-        let names = machines.compactMap { $0["Name"].map { $0.hasSuffix("*") ? String($0.dropLast()) : $0 } }
-        for (machine, name) in zip(machines, names) {
+        let named = machines.compactMap { m in m["Name"].map { (machine: m, name: $0.hasSuffix("*") ? String($0.dropLast()) : $0) } }
+        let names = named.map(\.name)
+        for (machine, name) in named {
             let vmType = machine["VMType"] ?? ""
             // The same name can exist under two providers (applehv and libkrun).
             let id = names.filter { $0 == name }.count > 1 ? "podman:\(vmType):\(name)" : "podman:\(name)"

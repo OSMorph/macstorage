@@ -523,6 +523,13 @@ final class CleanupSafetyTests: XCTestCase {
         ])
         let result = await DockerProvider().scan(ScanContext(tools: tools, home: NSTemporaryDirectory(), fullDiskAccess: true))
         XCTAssertEqual(result.owners.map(\.id), ["docker:c"])
+        let podmanLike = FakeTools([
+            { $0.contains("context ls") ? ToolOutput(status: 0, stdout: #"{"Name":"c","DockerEndpoint":"unix:///var/run/docker.sock"}"#) : nil },
+            { $0.contains(" info ") ? ToolOutput(status: 0, stdout: "ID1\tFedora CoreOS 41\n") : nil },
+            { $0.contains(" version ") ? ToolOutput(status: 1, stdout: "", stderr: "boom") : nil },
+        ])
+        let skipped = await DockerProvider().scan(ScanContext(tools: podmanLike, home: NSTemporaryDirectory(), fullDiskAccess: true))
+        XCTAssertTrue(skipped.owners.isEmpty, "a Podman machine isn't counted twice")
     }
 
     func testADockerContextThatReachesPodmanIsLeftToPodman() async {

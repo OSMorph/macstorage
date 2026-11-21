@@ -29,8 +29,9 @@ public struct DockerProvider: Provider {
             guard seenEngines.insert(engineID).inserted else { continue }
             // Podman answers Docker's API too (through its Docker socket); its machines are
             // measured with podman, so they aren't counted twice.
-            if let components = await ctx.output("docker", ["--context", name, "version", "--format", "{{range .Server.Components}}{{.Name}};{{end}}"], timeout: .seconds(10)),
-               components.localizedCaseInsensitiveContains("podman") {
+            // When the version can't be read, a Podman machine's Fedora system gives it away.
+            let components = await ctx.output("docker", ["--context", name, "version", "--format", "{{range .Server.Components}}{{.Name}};{{end}}"], timeout: .seconds(10))
+            if components?.localizedCaseInsensitiveContains("podman") ?? (info.last ?? "").localizedCaseInsensitiveContains("fedora") {
                 result.coverage.append(CoverageEntry(area: "Docker context \(name)", status: .skipped, detail: "Reaches Podman; measured under Podman instead."))
                 continue
             }

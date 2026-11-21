@@ -30,7 +30,7 @@ struct FoldersView: View {
                     }
                     Table(rows, selection: $model.selectedFolder, sortOrder: $order) {
                         TableColumn("Name", value: \.name) { r in
-                            Label(r.name, systemImage: r.isFolder == false ? "doc" : "folder").foregroundStyle(model.canOpen(r) || pending.contains(r.name) ? .primary : .secondary)
+                            Label(r.name, systemImage: r.isFolder == false ? "doc" : "folder")
                         }
                         TableColumn("Mostly", value: \.kind.label) { r in Text(r.bytes == nil ? (pending.contains(r.name) ? "" : "Unknown") : r.kind.label).foregroundStyle(.secondary) }.width(140)
                         TableColumn("On disk", value: \.sortBytes) { r in

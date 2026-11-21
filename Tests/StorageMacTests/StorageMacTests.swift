@@ -422,7 +422,11 @@ final class CleanupSafetyTests: XCTestCase {
         let tools = FakeTools([
             { $0.hasSuffix("machine list --all-providers --format json") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev*","Running":true,"VMType":"applehv","Port":50000,"RemoteUsername":"core"},{"Name":"dev-2","Running":false,"VMType":"applehv","Port":50001,"RemoteUsername":"core"}]"#) : nil },
             { $0.contains("connection list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","URI":"ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock","IsMachine":true},{"Name":"dev-root","URI":"ssh://root@127.0.0.1:50000/run/podman/podman.sock","IsMachine":true},{"Name":"dev-2","URI":"ssh://core@127.0.0.1:50001/run/user/501/podman/podman.sock","IsMachine":true}]"#) : nil },
-            { $0.hasPrefix("podman --connection dev system df") ? ToolOutput(status: 0, stdout: #"{"Type":"Images","TotalCount":3,"Active":1,"RawSize":3000,"RawReclaimable":2000}"#) : nil },
+            { $0.hasPrefix("podman --connection dev system df") ? ToolOutput(status: 0, stdout: [
+                #"{"Type":"Images","TotalCount":3,"Active":1,"RawSize":3000,"RawReclaimable":2000}"#,
+                #"{"Type":"Containers","TotalCount":2,"Active":1,"RawSize":100,"RawReclaimable":50}"#,
+                #"{"Type":"Local Volumes","TotalCount":1,"Active":0,"RawSize":10,"RawReclaimable":10}"#,
+            ].joined(separator: "\n")) : nil },
             { $0.hasPrefix("podman --connection dev images") ? ToolOutput(status: 0, stdout: [
                 #"{"repository":"localhost/app","tag":"1","Id":"aaa","Size":1000,"Containers":0}"#,
                 #"{"repository":"localhost/app","tag":"latest","Id":"aaa","Size":1000,"Containers":0}"#,
@@ -432,7 +436,8 @@ final class CleanupSafetyTests: XCTestCase {
             { $0.hasPrefix("podman --connection dev ps") ? ToolOutput(status: 0, stdout: "web\trunning\nold-job\texited\n") : nil },
             { $0.hasPrefix("podman --connection dev volume") ? ToolOutput(status: 0, stdout: "scratch\n") : nil },
             // The rootful store is empty: nothing from it is shown.
-            { $0.hasPrefix("podman --connection dev-root system df") ? ToolOutput(status: 0, stdout: #"{"Type":"Images","TotalCount":0,"Active":0,"RawSize":0,"RawReclaimable":0}"#) : nil },
+            { $0.hasPrefix("podman --connection dev-root system df") ? ToolOutput(status: 0, stdout: ["Images", "Containers", "Local Volumes"]
+                .map { #"{"Type":"\#($0)","TotalCount":0,"Active":0,"RawSize":0,"RawReclaimable":0}"# }.joined(separator: "\n")) : nil },
         ])
         let result = await PodmanProvider().scan(ScanContext(tools: tools, home: home.path, fullDiskAccess: true))
         let running = try XCTUnwrap(result.owners.first { $0.id == "podman:dev" })
@@ -448,6 +453,7 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertEqual(running.items.first { $0.kind == .podmanStoppedContainers }?.targets.map(\.id), ["old-job"])
         XCTAssertEqual(running.items.first { $0.kind == .podmanUnusedVolumes }?.targets.map(\.id), ["scratch"])
         XCTAssertFalse(running.items.contains { $0.name.contains("rootful") })
+        XCTAssertEqual(result.coverage.first { $0.area == "Podman (dev)" }?.detail, "Running; measured through dev and dev-root.")
         let stopped = try XCTUnwrap(result.owners.first { $0.id == "podman:dev-2" })
         XCTAssertEqual(stopped.items.map(\.kind), [.podmanVMDisk])
         XCTAssertFalse(tools.calls.contains { $0.contains("dev-2 ") && !$0.contains("connection list") }, "a stopped machine is never asked")
@@ -588,6 +594,17 @@ final class CleanupSafetyTests: XCTestCase {
         // Both stores answer, but system df prints nothing usable.
         let (result, _) = try await podmanMachine([{ $0.contains(" system df") ? ToolOutput(status: 0, stdout: "\n") : nil }])
         XCTAssertFalse(result.owners.first?.items.contains { $0.kind == .dockerDiskSlack } ?? true)
+        XCTAssertEqual(result.coverage.first?.status, .failed, "not Measured")
+        XCTAssertEqual(result.owners.first?.items.first { $0.kind == .podmanUnusedVolumes }?.onDisk, .notMeasured, "not 0 bytes")
+    }
+
+    func testAPartialUsageAnswerLeavesTheOverheadUnknown() async throws {
+        // Images only: the containers' and volumes' sizes are unknown.
+        let (result, _) = try await podmanMachine([
+            { $0.contains(" system df") ? ToolOutput(status: 0, stdout: #"{"Type":"Images","TotalCount":1,"Active":0,"RawSize":1000,"RawReclaimable":1000}"#) : nil },
+        ])
+        XCTAssertFalse(result.owners.first?.items.contains { $0.kind == .dockerDiskSlack } ?? true)
+        XCTAssertEqual(result.coverage.first?.status, .failed)
     }
 
     func testOlderPodmanKeepsASameNamedDiskOfAnotherProvider() {

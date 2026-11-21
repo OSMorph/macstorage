@@ -116,8 +116,11 @@ public struct PodmanProvider: Provider {
             return ([], nil, ["podman system df didn't answer through \(connection)"])
         }
         let usage = Dictionary(Parse.dockerSystemDF(df).map { ($0.type, $0) }, uniquingKeysWith: { a, _ in a })
-        let size = { (type: String) in usage[type].map { Measure.bytes($0.size) } ?? .bytes(0) }
+        // A row Podman didn't print is an unknown size, not zero.
+        let size = { (type: String) in usage[type].map { Measure.bytes($0.size) } ?? .notMeasured }
         var facts: [Fact] = [], problems: [String] = []
+        let rows = ["Images", "Containers", "Local Volumes"], complete = rows.allSatisfy { usage[$0] != nil }
+        if !complete { problems.append("podman system df's answer through \(connection) was incomplete, so some sizes are unknown") }
 
         // Podman counts each image's containers, running or stopped.
         if let listing = await ctx.output("podman", c + ["images", "--format", "{{json .}}"]) {
@@ -146,8 +149,8 @@ public struct PodmanProvider: Provider {
         } else { problems.append("podman volume ls didn't answer through \(connection)") }
         // Every command is checked against this connection right before it runs.
         for i in facts.indices { facts[i].scopeGuard = .podmanConnection(uri: uri, machine: machine) }
-        // An answer without the usual rows says nothing about the store's size.
-        return (facts, usage["Images"] == nil ? nil : usage.values.map(\.size).reduce(0, +), problems)
+        // Without every row, the store's total isn't known.
+        return (facts, complete ? rows.compactMap { usage[$0]?.size }.reduce(0, +) : nil, problems)
     }
 
     /// Connections by name, from `podman system connection list --format json`.

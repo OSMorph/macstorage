@@ -62,7 +62,11 @@ public struct PodmanProvider: Provider {
             var facts: [Fact] = [], contents: Int64 = 0, problems: [String] = [], asked = Set<String>(), askedNames: [String] = [], allSized = true
             for (connection, rootful) in [(name, false), (name + "-root", true)] {
                 // Podman makes both connections; without one, that store's size is unknown.
-                guard connections[connection] != nil else { allSized = false; continue }
+                guard connections[connection] != nil else {
+                    allSized = false
+                    problems.append("Podman has no \(connection) connection, so the \(rootful ? "rootful" : "rootless") store wasn't measured")
+                    continue
+                }
                 guard let uri = connections[connection].flatMap({ Self.machineURI($0, of: machine, rootful: rootful) }),
                       // A destination already measured, for this machine or another, isn't again.
                       seen.insert(Self.destination(uri)).inserted else {
@@ -142,7 +146,8 @@ public struct PodmanProvider: Provider {
         } else { problems.append("podman volume ls didn't answer through \(connection)") }
         // Every command is checked against this connection right before it runs.
         for i in facts.indices { facts[i].scopeGuard = .podmanConnection(uri: uri, machine: machine) }
-        return (facts, usage.values.map(\.size).reduce(0, +), problems)
+        // An answer without the usual rows says nothing about the store's size.
+        return (facts, usage["Images"] == nil ? nil : usage.values.map(\.size).reduce(0, +), problems)
     }
 
     /// Connections by name, from `podman system connection list --format json`.

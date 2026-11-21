@@ -580,6 +580,14 @@ final class CleanupSafetyTests: XCTestCase {
         let kinds = result.owners.first?.items.map(\.kind) ?? []
         XCTAssertTrue(kinds.contains(.podmanUnusedImages))
         XCTAssertFalse(kinds.contains(.dockerDiskSlack), "the rootful store may hold anything")
+        XCTAssertEqual(result.coverage.first?.status, .failed, "and coverage says so")
+        XCTAssertTrue(result.coverage.first?.detail.contains("dev-root") == true)
+    }
+
+    func testAnEmptyUsageAnswerLeavesTheOverheadUnknown() async throws {
+        // Both stores answer, but system df prints nothing usable.
+        let (result, _) = try await podmanMachine([{ $0.contains(" system df") ? ToolOutput(status: 0, stdout: "\n") : nil }])
+        XCTAssertFalse(result.owners.first?.items.contains { $0.kind == .dockerDiskSlack } ?? true)
     }
 
     func testOlderPodmanKeepsASameNamedDiskOfAnotherProvider() {

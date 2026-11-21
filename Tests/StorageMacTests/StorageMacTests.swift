@@ -597,7 +597,7 @@ final class FolderMeasurementsTests: XCTestCase {
     }
 
     @MainActor func waitUntil(_ condition: @escaping @MainActor () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(10)
+        let deadline = Date().addingTimeInterval(60)
         while !condition() {
             guard Date() < deadline else { return XCTFail("timed out") }
             try await Task.sleep(for: .milliseconds(5))
@@ -683,6 +683,35 @@ final class FolderMeasurementsTests: XCTestCase {
         try await waitUntil { m.levels["~/A"]?.problem != nil }
         XCTAssertEqual(m.levels["~/A"]?.problem, .unreadable)
         XCTAssertNil(m.measuring)
+    }
+
+    @MainActor func testAnEntryMeasuredWhileItsFolderWasReplacedIsDiscarded() async throws {
+        let a = home.appending(path: "A"), moved = home.appending(path: "A-moved"), elsewhere = home.appending(path: "B").path
+        // The swap happens during the second entry's walk.
+        let m = FolderMeasurements(home: home.path, list: { _ in ["one", "two", "three"] }, measure: { name, _, _, _ in
+            if name == "two" {
+                try? FileManager.default.moveItem(at: a, to: moved)
+                try? FileManager.default.createSymbolicLink(atPath: a.path, withDestinationPath: elsewhere)
+            }
+            return FolderEntry(name: name, bytes: 1_000, kind: .personalFiles, isFolder: false)
+        }, flushInterval: .milliseconds(10))
+        m.open("~/A", owners: [], protected: [])
+        try await waitUntil { m.levels["~/A"]?.problem != nil }
+        XCTAssertEqual(m.levels["~/A"]?.problem, .notAFolder)
+        XCTAssertTrue(m.levels["~/A"]?.entries.isEmpty ?? true, "nothing measured through the link is shown")
+    }
+
+    @MainActor func testALargeFolderIsMeasuredCompletely() async throws {
+        // Real files: 20,000 entries listed, measured, merged and counted.
+        let big = home.appending(path: "A")
+        for i in 0..<20_000 { FileManager.default.createFile(atPath: big.appending(path: "f\(i)").path, contents: Data([1])) }
+        let m = FolderMeasurements(home: home.path, flushInterval: .milliseconds(250))
+        let started = Date()
+        m.open("~/A", owners: [], protected: [])
+        try await waitUntil { m.levels["~/A"]?.isMeasuring == false }
+        XCTAssertEqual(m.levels["~/A"]?.entries.count, 20_000)
+        XCTAssertEqual(m.levels["~/A"]?.measured, 20_000)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 60)
     }
 
     @MainActor func testARefusedFolderIsNeverRead() async throws {

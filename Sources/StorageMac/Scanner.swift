@@ -165,6 +165,8 @@ public enum FolderAttribution {
         let options = ctx.walk(limit: .seconds(30))
         var result: [String: [FolderEntry]] = [:]
         for (key, path) in [("~", ctx.home), ("~/Library", ctx.home + "/Library")] {
+            // The same checks as a level opened later: a real folder on the home's volume.
+            guard refusal(path, home: ctx.home, protected: []) == nil else { continue }
             result[key] = (names(in: path) ?? []).compactMap { entry($0, in: path, owners: owners, options) }
                 .sorted { ($0.bytes ?? 0) > ($1.bytes ?? 0) }
         }
@@ -179,9 +181,10 @@ public enum FolderAttribution {
     /// Why `path` (inside `home`) mustn't be read, or nil when it can be: it must be a real
     /// folder reached without following links, on the home folder's volume, and not inside
     /// a folder in `protected`. Checked right before listing; the walks below it never
-    /// follow links or leave the volume themselves. On-demand levels repeat it before each
-    /// entry, so a folder replaced by a link mid-level stops there. (What remains is a link
-    /// swapped in during one entry's walk: same user, read only.)
+    /// follow links or leave the volume themselves. On-demand levels repeat it before and
+    /// after each entry: a folder replaced by a link mid-level stops there, and an entry
+    /// measured while it was replaced is discarded. (The reads during that one walk still
+    /// happen: file sizes only, by the same user, never shown.)
     public static func refusal(_ path: String, home: String, protected: Set<String>) -> Refusal? {
         var st = stat(), homeStat = stat()
         guard lstat(path, &st) == 0 else { return errno == EACCES ? .unreadable : .notAFolder }

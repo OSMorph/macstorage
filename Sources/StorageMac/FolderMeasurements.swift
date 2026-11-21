@@ -131,8 +131,12 @@ public final class FolderMeasurements {
                 // The folder is checked again before each entry: replaced by a link or a
                 // protected folder mid-level, measuring stops there.
                 let (refusal, entry) = await offload { () -> (FolderAttribution.Refusal?, FolderEntry?) in
-                    if let refusal = FolderAttribution.refusal(full, home: home, protected: protected) { return (refusal, nil) }
-                    return (nil, measure(name, full, owners, options))
+                    let check = { FolderAttribution.refusal(full, home: home, protected: protected) }
+                    if let refusal = check() { return (refusal, nil) }
+                    let entry = measure(name, full, owners, options)
+                    // Replaced while it was measured: what was measured may be elsewhere.
+                    if let refusal = check() { return (refusal, nil) }
+                    return (nil, entry)
                 }
                 if let refusal { refused = refusal; break }
                 // A stopped walk is incomplete: leave that entry pending.

@@ -16,7 +16,10 @@ struct FoldersView: View {
         if let s = model.snapshot {
             let level = model.folderLevel(model.folderPath)
             let entries = level?.entries ?? []
-            let all = filter.isEmpty ? entries : entries.filter { $0.name.localizedCaseInsensitiveContains(filter) }
+            // An exact name comes first, so it's listed however many others match.
+            let all = filter.isEmpty ? entries
+                : entries.filter { $0.name.localizedCaseInsensitiveCompare(filter) == .orderedSame }
+                + entries.filter { $0.name.localizedCaseInsensitiveContains(filter) && $0.name.localizedCaseInsensitiveCompare(filter) != .orderedSame }
             // Entries come largest first, so the limit keeps the largest without sorting them all.
             let rows = Array(all.prefix(Self.rowLimit)).sorted(using: order)
             HSplitView {

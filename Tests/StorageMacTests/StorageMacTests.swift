@@ -214,8 +214,17 @@ final class CleanupSafetyTests: XCTestCase {
         let journal = Journal()
         var plan = CleanupPlan(snapshot: Demo.snapshot(), selected: [], picks: [:])
         plan.steps = [step([Target("x")], action: .runOnTargets(Command("nix-store", ["--delete"]), .mac), kind: .nixDeadPaths)]
-        _ = await executor().run(plan, stop: StopSignal(), journal: { journal.add($0) })
+        _ = await executor().run(plan, stop: StopSignal(), journal: { journal.add($0); return true })
         XCTAssertEqual(journal.records.first?.steps.first?.outcome, .failed(error: CleanupExecutor.interrupted))
+    }
+
+    func testNothingRunsWhenTheRecordCantBeSaved() async {
+        let tools = FakeTools()
+        var plan = CleanupPlan(snapshot: Demo.snapshot(), selected: [], picks: [:])
+        plan.steps = [step([Target("x")], action: .runOnTargets(Command("nix-store", ["--delete"]), .mac), kind: .nixDeadPaths)]
+        let run = await executor(tools).run(plan, stop: StopSignal(), journal: { _ in false })
+        XCTAssertEqual(run.steps[0].outcome, .notRun(reason: CleanupExecutor.notJournaled))
+        XCTAssertTrue(tools.calls.isEmpty)
     }
 
     // MARK: Docker binding
@@ -318,11 +327,38 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertGreaterThan(measured, 0)
     }
 
+    func testASymlinkAddedAfterThePreviewSkipsTheClear() async throws {
+        let folder = try cacheFolder()
+        let s = try cacheStep(folder)
+        try FileManager.default.createSymbolicLink(atPath: folder.appending(path: "link").path, withDestinationPath: "/etc")
+        let tools = goTools(folder)
+        let result = await executor(tools).perform(s, previewTime: .now)
+        guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertFalse(tools.calls.contains("go clean -cache"))
+    }
+
+    func testTheManifestListsEveryNameAndFolder() throws {
+        let folder = try cacheFolder()
+        try FileManager.default.createDirectory(at: folder.appending(path: "sub"), withIntermediateDirectories: true)
+        XCTAssertEqual(link(folder.appending(path: "a").path, folder.appending(path: "sub/a2").path), 0)
+        let names = Set(FileSizes.manifest(folder.path).targets.map { ($0.id as NSString).lastPathComponent })
+        XCTAssertEqual(names, ["a", "sub", "a2"])
+    }
+
+    func testAHomebrewDryRunThatWouldDoMoreSkipsTheStep() async {
+        let tools = FakeTools([{ $0 == "brew cleanup -n" ? ToolOutput(status: 0, stdout: "Would remove: /opt/homebrew/Cellar/a/1 (1MB)\nWould prune 3 symbolic links\n") : nil }])
+        let s = step([Target("/opt/homebrew/Cellar/a/1")], action: .runAfterRecheck(Command("brew", ["cleanup"]), .mac), kind: .homebrewOldVersions)
+        let result = await executor(tools).perform(s, previewTime: .now)
+        guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertFalse(tools.calls.contains("brew cleanup"))
+    }
+
     // MARK: Measurement
 
     func testSimulatorsAreMeasuredByTheirFolders() async throws {
         let devices = home.appending(path: "Devices")
         try FileManager.default.createDirectory(at: devices.appending(path: "UDID-1"), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: devices.appending(path: "UDID-1/data.img").path, contents: Data(repeating: 1, count: 50_000))
         var s = step([Target("UDID-1", bytes: 5_000)], action: .runOnTargets(Command("xcrun", ["simctl", "delete"]), .mac), kind: .simulatorsUnavailable)
         s.item.path = devices.path
         let tools = FakeTools([{ line in
@@ -331,7 +367,8 @@ final class CleanupSafetyTests: XCTestCase {
             return ToolOutput(status: 0, stdout: "")
         }])
         let result = await executor(tools).perform(s, previewTime: .now)
-        XCTAssertEqual(result.outcome, .done(measured: 5_000))
+        guard case .done(let measured?) = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertGreaterThanOrEqual(measured, 50_000, "measured from the folder, not the scan's 5,000 bytes")
     }
 
     func testAFailureStopsTheRest() async {
@@ -353,6 +390,47 @@ final class CleanupSafetyTests: XCTestCase {
         let result = await executor(tools).perform(step([Target("r1")], action: action, kind: .dockerBuildCache), previewTime: .now)
         guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
         XCTAssertFalse(tools.calls.contains { $0.contains("prune") })
+    }
+}
+
+final class ScannerTests: XCTestCase {
+    struct Slow: Provider {
+        let area = "Slow"
+        func scan(_ ctx: ScanContext) async -> ProviderResult {
+            while !ctx.stop.isStopped { try? await Task.sleep(for: .milliseconds(20)) }
+            return ProviderResult()
+        }
+    }
+
+    struct Quick: Provider {
+        let area = "Quick"
+        func scan(_ ctx: ScanContext) async -> ProviderResult {
+            let fact = Fact(.appLogs, onDisk: .bytes(1_000), targets: [])
+            return ProviderResult(owners: [Owner(id: "quick", name: "Quick", kind: .system, location: "", items: [Rules.item(fact)])],
+                                  coverage: [CoverageEntry(area: area, status: .measured, detail: "")])
+        }
+    }
+
+    final class Seen: @unchecked Sendable {
+        let lock = NSLock()
+        var progress: [ScanProgress] = []
+    }
+
+    func testAStoppedScanKeepsWhatFinishedAndMarksTheRest() async throws {
+        let home = FileManager.default.temporaryDirectory.appending(path: "scan-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let context = ScanContext(tools: FakeTools(), home: home.path, fullDiskAccess: true)
+        let seen = Seen()
+        let scan = Task { await Scanner(providers: [Quick(), Slow()]).scan(context) { p in seen.lock.withLock { seen.progress.append(p) } } }
+        try await Task.sleep(for: .milliseconds(300))
+        let partial = try XCTUnwrap(seen.lock.withLock { seen.progress.last }).partialSnapshot()
+        XCTAssertEqual(partial.owners.map(\.id), ["quick"], "results appear as each area finishes")
+        XCTAssertTrue(partial.isPartial)
+        context.stop.stop()
+        let result = await scan.value
+        XCTAssertTrue(result.isPartial)
+        XCTAssertEqual(Set(result.unfinishedAreas), ["Folder sizes"])
     }
 }
 
@@ -378,22 +456,50 @@ final class HistoryStoreTests: XCTestCase {
     func testHistoryKeepsACompactCopyAndTheRunFileKeepsEverything() throws {
         let store = HistoryStore(folder: folder)
         let run = bigRun()
-        let receipt = try store.save(run)
+        let receipt = try XCTUnwrap(try store.save(run))
         let compact = try XCTUnwrap(store.loadHistory().runs.first)
+        XCTAssertTrue(compact.isCompact)
         XCTAssertEqual(compact.steps[0].step.approvedTargets.count, 200)
         XCTAssertTrue(compact.steps[0].step.item.targets.isEmpty)
         XCTAssertEqual(compact.steps[0].executed.count, 4)
-        XCTAssertEqual(store.fullRun(run.id), run)
+        let full = try XCTUnwrap(store.fullRun(run.id))
+        XCTAssertFalse(full.isCompact)
+        XCTAssertEqual(full.steps[0].step.approvedTargets, run.steps[0].step.approvedTargets)
+        XCTAssertEqual(full.steps[0].executed, run.steps[0].executed)
         XCTAssertTrue(try String(contentsOf: receipt, encoding: .utf8).contains("/cache/file-299"))
     }
 
     func testAReceiptIsNeverRewrittenFromTheCompactCopy() throws {
         let store = HistoryStore(folder: folder)
         let run = bigRun()
-        let written = try store.save(run)
+        let written = try XCTUnwrap(try store.save(run))
         let compact = try XCTUnwrap(store.loadHistory().runs.first)
         XCTAssertEqual(try store.receipt(compact), written)
         XCTAssertTrue(try String(contentsOf: written, encoding: .utf8).contains("/cache/file-299"))
+    }
+
+    func testSavingACompactCopyNeverTruncatesTheFullRecord() throws {
+        let store = HistoryStore(folder: folder)
+        let run = bigRun()
+        try store.save(run)
+        var compact = try XCTUnwrap(store.loadHistory().runs.first)
+        compact.trashDeletions.append(.init(date: .now, deleted: [], refused: ["/gone"]))
+        try store.save(compact)   // e.g. a retry or a Trash deletion from History after a relaunch
+        let full = try XCTUnwrap(store.fullRun(run.id))
+        XCTAssertEqual(full.steps[0].step.approvedTargets.count, 300)
+        XCTAssertEqual(full.steps[0].executed.count, 10)
+        XCTAssertEqual(full.trashDeletions.count, 1)
+    }
+
+    func testAnUnreadableHistoryThatCantBeSetAsideIsNotOverwritten() throws {
+        let store = HistoryStore(folder: folder)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let history = folder.appending(path: "history.json")
+        try Data("not json".utf8).write(to: history)
+        chmod(folder.path, 0o555)   // the folder can't be changed, so the file can't be moved aside
+        defer { chmod(folder.path, 0o755) }
+        XCTAssertThrowsError(try store.save(bigRun()))
+        XCTAssertEqual(try String(contentsOf: history, encoding: .utf8), "not json")
     }
 
     func testALaterTrashDeletionUpdatesTheFullRecord() throws {

@@ -66,7 +66,7 @@ struct OwnerTable: View {
                 Label { Text(o.name) } icon: { RoundedRectangle(cornerRadius: 2).fill(o.kind.color).frame(width: 8, height: 8) }
             }
             TableColumn("Kind", value: \.kind.label) { o in Text(o.kind.label).foregroundStyle(.secondary) }.width(130)
-            TableColumn("On disk", value: \.onDisk) { o in Text(formatBytes(o.onDisk)).monospacedDigit() }.width(90)
+            TableColumn("On disk", value: \.onDisk) { o in MeasureText(measure: o.onDiskMeasure) }.width(90)
             TableColumn("Reclaimable") { o in ReclaimableText(label: accounting.reclaimableLabel(owner: o)) }.width(170)
         }
         .contextMenu(forSelectionType: Owner.ID.self) { _ in } primaryAction: { ids in

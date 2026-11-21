@@ -147,7 +147,7 @@ struct RunningPhase: View {
             Text("Cleaning up: step \(min(current + 1, plan.steps.count)) of \(plan.steps.count)").font(.title3.weight(.semibold))
             Text("Steps run one at a time. Stopping lets the current step finish with its real outcome.").foregroundStyle(.secondary)
             if model.journalFailed {
-                Label("The progress record couldn't be saved. If the app quits before the end, this cleanup won't be in History.", systemImage: "exclamationmark.triangle.fill")
+                Label("The cleanup record couldn't be saved, so the app stopped before changing anything else.", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(Color.warningText)
             }
             List(Array(plan.steps.enumerated()), id: \.offset) { i, step in
@@ -168,7 +168,7 @@ struct RunningPhase: View {
                 Spacer()
                 if model.stopping {
                     ProgressView().controlSize(.small)
-                    Text("Stopping after this step…").foregroundStyle(.secondary)
+                    Text(model.quitting ? "Quitting after this step, once the cleanup is recorded…" : "Stopping after this step…").foregroundStyle(.secondary)
                 } else {
                     Button("Stop after this step", action: model.stopRun).keyboardShortcut(.cancelAction).focused($stopFocused)
                 }
@@ -232,6 +232,7 @@ struct ResultsPhase: View {
                         Text("\(r.step.ownerName) · \(r.step.item.name)")
                         Spacer()
                         Text(outcomeText(r)).monospacedDigit().foregroundStyle(.secondary)
+                            .help(r.outcome.measured != nil ? r.step.item.kind.measurementNote.map { "Measured \($0), so other activity can affect it." } ?? "" : "")
                     }
                     switch r.outcome {
                     case .skipped(let why):

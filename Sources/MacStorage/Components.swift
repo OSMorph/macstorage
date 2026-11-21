@@ -110,7 +110,7 @@ struct ReclaimableText: View {
             HStack(spacing: 6) {
                 ForEach(Destination.allCases.filter { r[$0] > 0 }, id: \.self) { d in
                     HStack(spacing: 2) {
-                        Text((r.includesUpperBound ? "≤ " : "") + formatBytes(r[d])).monospacedDigit()
+                        Text(r.boundPrefix(d) + formatBytes(r[d])).monospacedDigit()
                         Text(d.shortLabel).font(.caption2).foregroundStyle(.secondary)
                     }
                 }

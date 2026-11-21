@@ -120,7 +120,7 @@ struct TierTile: View {
         // Lead with the largest destination; the others follow, never added to it.
         let order = Destination.allCases.sorted { r[$0] > r[$1] }
         let phrase: [Destination: String] = [.mac: "right away", .trash: "after emptying the Trash", .containerDisk: "inside Docker's disk"]
-        let bound = { (d: Destination) in formatBytes(r[d], upperBound: r.includesUpperBound) }
+        let bound = { (d: Destination) in r.boundPrefix(d) + formatBytes(r[d]) }
         Tile(title: { TierBadge(tier: tier) }, value: bound(order[0]), unit: phrase[order[0]]!,
              secondary: "+ \(bound(order[1])) \(phrase[order[1]]!)",
              note: "+ \(bound(order[2])) \(phrase[order[2]]!)."
@@ -145,7 +145,7 @@ struct OwnerRanking: View {
                 Label { Text(o.name) } icon: { RoundedRectangle(cornerRadius: 2).fill(o.kind.color).frame(width: 8, height: 8) }
             }
             TableColumn("Kind") { o in Text(o.kind.label).foregroundStyle(.secondary) }.width(130)
-            TableColumn("On disk") { o in Text(formatBytes(o.onDisk)).monospacedDigit() }.width(80)
+            TableColumn("On disk") { o in MeasureText(measure: o.onDiskMeasure) }.width(80)
             TableColumn("") { o in
                 let r = min(o.onDisk, accounting.reclaimable(owner: o).onHost)
                 GeometryReader { g in

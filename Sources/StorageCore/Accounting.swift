@@ -4,8 +4,19 @@ import Foundation
 /// into one "freed" number in the UI, because they mean different things.
 public struct Reclaimable: Equatable, Sendable {
     public var byDestination: [Destination: Int64] = [:]
-    /// True when part of the total is an upper bound (for example a pnpm store prune).
-    public var includesUpperBound = false
+    /// Destinations whose figure is partly an upper bound (unused Docker images share layers).
+    public var upperBound: Set<Destination> = []
+    /// Destinations whose figure is partly a lower bound (a walk that stopped early).
+    public var lowerBound: Set<Destination> = []
+
+    /// True when part of the total is an upper bound.
+    public var includesUpperBound: Bool { !upperBound.isEmpty }
+
+    /// "≤ " or "≥ " for a destination whose figure isn't exact, "" otherwise.
+    public func boundPrefix(_ d: Destination) -> String {
+        guard self[d] > 0 else { return "" }
+        return upperBound.contains(d) ? "≤ " : lowerBound.contains(d) ? "≥ " : ""
+    }
 
     public init() {}
 
@@ -18,7 +29,8 @@ public struct Reclaimable: Equatable, Sendable {
     mutating func add(_ item: Item) {
         guard let bytes = item.reclaimable.bytes, let d = item.action.destination else { return }
         byDestination[d, default: 0] += bytes
-        includesUpperBound = includesUpperBound || item.reclaimableIsUpperBound
+        if item.reclaimableIsUpperBound { upperBound.insert(d) }
+        if case .atLeast = item.reclaimable { lowerBound.insert(d) }
     }
 }
 

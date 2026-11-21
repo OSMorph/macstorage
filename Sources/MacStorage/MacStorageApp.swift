@@ -40,8 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let model = Self.model
         guard model.isRunning else { return .terminateNow }
-        model.onRunFinished = { NSApp.reply(toApplicationShouldTerminate: true) }
-        model.stopRun()
+        // If the record couldn't be saved, stay open: the results offer to save it again.
+        model.quitAfterRun { saved in NSApp.reply(toApplicationShouldTerminate: saved) }
         return .terminateLater
     }
 }

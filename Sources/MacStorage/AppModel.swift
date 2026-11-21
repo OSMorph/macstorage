@@ -41,11 +41,11 @@ enum SheetPhase: Equatable {
 @MainActor @Observable
 final class AppModel {
     let demo: Bool
-    private(set) var snapshot: Snapshot?
+    private(set) var snapshot: Snapshot? { didSet { refreshPlan() } }
     private(set) var history = History()
     /// What cleanups since the snapshot changed: cleaned and partly cleaned items, and
     /// picked entries already in the Trash. Derived from History, so it survives relaunches.
-    private(set) var cleanupState = CleanupState()
+    private(set) var cleanupState = CleanupState() { didSet { refreshPlan() } }
     var cleaned: [String: UUID] { cleanupState.cleaned }
     var removedPicks: [String: Set<String>] { cleanupState.removedPicks }
     /// True until the saved scan and history have been read at launch.
@@ -61,8 +61,11 @@ final class AppModel {
     var openRunID: UUID?
 
     /// Automatic items ticked in Cleanup, and the entries picked for Review items.
-    var selected: Set<String> = []
-    var picks: [String: Set<String>] = [:]
+    var selected: Set<String> = [] { didSet { refreshPlan() } }
+    var picks: [String: Set<String>] = [:] { didSet { refreshPlan() } }
+    /// The plan for what's ticked and picked, kept current as those change so views don't
+    /// rebuild it on every render. The preview builds a fresh one (with its own time).
+    private(set) var currentPlan: CleanupPlan?
 
     private(set) var scanning: ScanProgress?
     var sheet: SheetPhase?
@@ -72,6 +75,8 @@ final class AppModel {
     private(set) var unsavedRuns: [UUID: String] = [:]
     /// Set while a cleanup is stopping (after "Stop after this step" or Quit).
     private(set) var stopping = false
+    /// Set when the user quit during a cleanup: the app quits once the run is recorded.
+    private(set) var quitting = false
     /// Set when the in-progress record couldn't be saved during the run.
     private(set) var journalFailed = false
     private(set) var fullDiskAccess = FullDiskAccess.isGranted
@@ -83,8 +88,16 @@ final class AppModel {
     private var stopSignal = StopSignal()
     private var tools: ToolLocator?
     private let store = HistoryStore()
-    /// Called once the run in progress has finished and been saved (to let the app quit).
-    var onRunFinished: (() -> Void)?
+    /// Called once the run in progress has finished, with whether its record was saved.
+    private var onRunFinished: ((Bool) -> Void)?
+
+    /// Quit during a cleanup: stop after the current step, then call `done` with whether
+    /// the record was saved (the app stays open if it wasn't, so the record isn't lost).
+    func quitAfterRun(_ done: @escaping (Bool) -> Void) {
+        quitting = true
+        onRunFinished = done
+        stopRun()
+    }
 
     init(demo: Bool) {
         self.demo = demo
@@ -180,9 +193,11 @@ final class AppModel {
         switch outcome {
         case .success(let saved):
             scanSaveError = nil
-            // Keep runs whose record couldn't be saved; they're still offered for retry.
+            // Runs whose record couldn't be saved stay as they are in memory (complete),
+            // replacing any older copy on disk; they're still offered for retry.
             var merged = saved
-            merged.runs += history.runs.filter { unsavedRuns[$0.id] != nil && !saved.runs.map(\.id).contains($0.id) }
+            merged.runs.removeAll { unsavedRuns[$0.id] != nil }
+            merged.runs += history.runs.filter { unsavedRuns[$0.id] != nil }
             merged.runs.sort { $0.started > $1.started }
             load(result, history: merged)
         case .failure(let error):
@@ -214,11 +229,13 @@ final class AppModel {
 
     // MARK: Cleanup
 
-    func plan() -> CleanupPlan? {
+    private func makePlan() -> CleanupPlan? {
         guard let snapshot else { return nil }
         let picked = picks.mapValues { ids in ids.map { Target($0) } }
         return CleanupPlan(snapshot: snapshot, selected: selected, picks: picked, cleaned: Set(cleaned.keys))
     }
+
+    private func refreshPlan() { currentPlan = makePlan() }
 
     /// The sidebar badge: ticked automatic items plus Review items with picks. Cheap enough
     /// to compute on every render, unlike building the plan.
@@ -227,7 +244,7 @@ final class AppModel {
     }
 
     func openPreview() {
-        guard cleanupBlocked == nil, let plan = plan(), !plan.steps.isEmpty else { return }
+        guard cleanupBlocked == nil, let plan = makePlan(), !plan.steps.isEmpty else { return }
         sheet = .preview(plan)
     }
 
@@ -240,9 +257,16 @@ final class AppModel {
         Task {
             let report: @Sendable (Int, StepOutcome?) -> Void = { i, o in Task { @MainActor in self.progress(i, o) } }
             // Saved before each step, so quitting or a crash mid-run still leaves a record.
-            let journal: @Sendable (RunRecord) -> Void = { record in
-                guard !demo, (try? store.save(record)) == nil else { return }
-                Task { @MainActor in self.journalFailed = true }
+            // If it can't be saved, the run stops before changing anything else.
+            let journal: @Sendable (RunRecord) -> Bool = { record in
+                guard !demo else { return true }
+                do {
+                    try store.save(record, receipt: false)
+                    return true
+                } catch {
+                    Task { @MainActor in self.journalFailed = true }
+                    return false
+                }
             }
             let record: RunRecord
             if demo {
@@ -276,7 +300,10 @@ final class AppModel {
         await persist(run)
         stopping = false
         sheet = .results(run)
-        onRunFinished?()
+        let done = onRunFinished
+        onRunFinished = nil
+        quitting = false
+        done?(unsavedRuns[run.id] == nil)
     }
 
     func persist(_ run: RunRecord) async {

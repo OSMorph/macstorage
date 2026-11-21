@@ -54,7 +54,7 @@ public struct XcodeProvider: Provider {
         typealias Entry = (target: Target, size: FolderSize)
         func entries(_ sub: String) async -> [Entry] {
             await offload {
-                FileSizes.children(of: dev + "/" + sub, options).map { name, size in
+                (FileSizes.children(of: dev + "/" + sub, options) ?? []).map { name, size in
                     let path = dev + "/" + sub + "/" + name
                     return (Target(path, bytes: size.privateBytes, identity: FileSizes.identity(path)), size)
                 }
@@ -116,7 +116,7 @@ public struct LibraryProvider: Provider {
         func collect(_ folder: String, _ kind: ItemKind) async {
             let root = ctx.expand(folder), options = ctx.walk()
             guard !ctx.protectedPaths.contains(root) else { return }
-            for (name, size) in await offload({ FileSizes.children(of: root, options) }) where size.allocated >= Self.threshold {
+            for (name, size) in await offload({ FileSizes.children(of: root, options) ?? [] }) where size.allocated >= Self.threshold {
                 let path = root + "/" + name, key = Self.appKey(name)
                 var fact = Fact(kind, key: "\((folder as NSString).lastPathComponent)/\(name)", onDisk: size.onDisk,
                                 sharedBytes: size.shared > 0 ? size.shared : nil, reclaimable: size.reclaimable,
@@ -136,13 +136,16 @@ public struct LibraryProvider: Provider {
         }
         // Logs go to the Trash folder by folder (one per app), so the list stays short.
         let logs = ctx.expand("~/Library/Logs"), options = ctx.walk()
-        let logFolders = await offload { FileSizes.children(of: logs, options) }
+        let listed = await offload { FileSizes.children(of: logs, options) }
+        let logFolders = listed ?? []
         let logTargets = logFolders.map { Target(logs + "/" + $0.name, bytes: $0.size.privateBytes, identity: FileSizes.identity(logs + "/" + $0.name)) }
-        let logSize = FolderSize.total(logFolders.map(\.size)), logBytes = logSize.allocated
+        var logSize = FolderSize.total(logFolders.map(\.size))
+        if listed == nil { logSize.unreadable += 1 }   // the folder couldn't be listed: a lower bound, not zero
+        let logBytes = logSize.allocated
         var logFact = Fact(.appLogs, onDisk: logSize.onDisk, reclaimable: logSize.reclaimable, targets: logTargets, path: logs)
         logFact.targetsComplete = logSize.isComplete
         let logOwner = Owner(id: "logs", name: "Logs", kind: .system, location: "~/Library/Logs", items: [Rules.item(logFact)])
-        return ProviderResult(owners: owners + (logBytes > 0 ? [logOwner] : []),
+        return ProviderResult(owners: owners + (logBytes > 0 || listed == nil ? [logOwner] : []),
                               coverage: [CoverageEntry(area: area, status: .measured, detail: "Caches, app data\(ctx.fullDiskAccess ? ", containers" : "") and logs in ~/Library.")])
     }
 
@@ -173,14 +176,15 @@ public struct PersonalFilesProvider: Provider {
         let downloads = ctx.expand("~/Downloads"), documents = ctx.expand("~/Documents")
         let oldEnough = Date().addingTimeInterval(-90 * 86_400)
         let options = ctx.walk(), noGit = ctx.walk(skipGitCheckouts: true)
-        let (children, documentsSize) = await offload { (FileSizes.children(of: downloads, options), FileSizes.measure(documents, noGit)) }
+        let (listed, documentsSize) = await offload { (FileSizes.children(of: downloads, options), FileSizes.measure(documents, noGit)) }
+        let children = listed ?? []
         // The pickable list: the largest entries not touched for 90 days.
         let candidates = children.filter { name, _ in
             let date = (try? FileManager.default.attributesOfItem(atPath: downloads + "/" + name))?[.modificationDate] as? Date
             return (date ?? .distantPast) < oldEnough
         }.prefix(50).map { Target(downloads + "/" + $0.name, bytes: $0.size.privateBytes, identity: FileSizes.identity(downloads + "/" + $0.name)) }
         let facts = [
-            Fact(.downloads, onDisk: FolderSize.total(children.map(\.size)).onDisk, targets: Array(candidates), path: downloads),
+            Fact(.downloads, onDisk: listed == nil ? .notMeasured : FolderSize.total(children.map(\.size)).onDisk, targets: Array(candidates), path: downloads),
             // Git checkouts inside Documents belong to the Git owner; don't count them twice.
             Fact(.documents, onDisk: documentsSize.onDisk, path: documents),
         ]

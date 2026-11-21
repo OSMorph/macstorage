@@ -12,6 +12,8 @@ public struct FolderSize: Sendable, Equatable {
     public var unreadable = 0
     /// False when the time limit or cancellation stopped the walk early.
     public var finished = true
+    /// Folders not entered: on another volume, excluded, or a nested git checkout.
+    public var skippedSubtrees = 0
 
     /// Bytes shared with other files (clones), so not freed by deleting this.
     public var shared: Int64 { max(0, allocated - privateBytes) }
@@ -120,34 +122,51 @@ public enum FileSizes {
         return size
     }
 
-    /// Lists beyond this many files aren't kept: the step is then handed to the user.
+    /// Lists beyond this many entries aren't kept: the step is then handed to the user.
     public static let manifestLimit = 200_000
 
-    /// Every file under `path` with its size and identity, for a cleanup manifest, plus
-    /// whether the list is complete.
+    /// Every entry under `path` (files, folders, symlinks, every name of a hard-linked
+    /// file) with its identity, for a cleanup manifest, plus whether the list is complete.
+    /// A subtree the walk didn't enter (another volume, an excluded folder) makes it
+    /// incomplete. Folders are recorded without a modification time: adding an entry
+    /// changes it, and the new entry is listed itself.
     public static func manifest(_ path: String, _ options: WalkOptions = WalkOptions()) -> (targets: [Target], size: FolderSize) {
         var size = FolderSize()
         var targets: [Target] = []
         var truncated = false
         walk(path, options, into: &size) { p, st in
             guard targets.count < manifestLimit else { truncated = true; return }
-            targets.append(Target(p, bytes: Int64(st.st_blocks) * 512, identity: FileIdentity(
-                device: Int64(st.st_dev), inode: UInt64(st.st_ino), modified: Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)))
+            let isDirectory = st.st_mode & S_IFMT == S_IFDIR
+            let isFile = st.st_mode & S_IFMT == S_IFREG
+            targets.append(Target(p, bytes: isFile ? Int64(st.st_blocks) * 512 : nil, identity: FileIdentity(
+                device: Int64(st.st_dev), inode: UInt64(st.st_ino),
+                modified: isDirectory ? 0 : Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)))
         }
-        if truncated { size.finished = false }
+        if truncated || size.skippedSubtrees > 0 { size.finished = false }
         return (targets, size)
     }
 
-    /// The entries directly inside `path`, largest first. Entries in `options.excluding`
-    /// are left out without being opened.
-    public static func children(of path: String, _ options: WalkOptions = WalkOptions()) -> [(name: String, size: FolderSize)] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+    /// A manifest entry's identity as it is now, recorded the way `manifest` records it.
+    static func manifestIdentity(_ path: String) -> FileIdentity? {
+        guard var identity = identity(path) else { return nil }
+        if isDirectory(path) { identity.modified = 0 }
+        return identity
+    }
+
+    /// The entries directly inside `path`, largest first, or nil if the folder exists but
+    /// can't be listed. Entries in `options.excluding` are left out without being opened.
+    public static func children(of path: String, _ options: WalkOptions = WalkOptions()) -> [(name: String, size: FolderSize)]? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: path) else {
+            return FileManager.default.fileExists(atPath: path) ? nil : []
+        }
         return names.filter { !options.excluding.contains(path + "/" + $0) }
             .map { ($0, measure(path + "/" + $0, options)) }
             .sorted { $0.size.allocated > $1.size.allocated }
     }
 
-    private static func walk(_ path: String, _ options: WalkOptions, into size: inout FolderSize, file: (String, stat) -> Void) {
+    /// Visits every entry below `path` (not `path` itself), adding regular files to `size`
+    /// with hard links counted once.
+    private static func walk(_ path: String, _ options: WalkOptions, into size: inout FolderSize, entry: (String, stat) -> Void) {
         let deadline = ContinuousClock.now + options.limit
         // Match exclusions however the path is spelled (/var/… is /private/var/… on disk).
         let excluded = Set(options.excluding.flatMap { [$0, realPath($0)].compactMap { $0 } })
@@ -162,7 +181,6 @@ public enum FileSizes {
             size.files += 1
             size.allocated += allocated
             size.privateBytes += privateBytes(p) ?? allocated
-            file(p, st)
         }
 
         guard st.st_mode & S_IFMT == S_IFDIR else {
@@ -179,11 +197,13 @@ public enum FileSizes {
             if Task.isCancelled || options.stop?.isStopped == true || ContinuousClock.now > deadline { size.finished = false; break }
             let p = url.path
             guard lstat(p, &st) == 0 else { unreadable += 1; continue }
+            entry(p, st)
             switch st.st_mode & S_IFMT {
             case S_IFDIR:
                 if st.st_dev != rootDevice || excluded.contains(p)
                     || (options.skipGitCheckouts && FileManager.default.fileExists(atPath: p + "/.git")) {
                     walker.skipDescendants()
+                    size.skippedSubtrees += 1
                 }
             case S_IFREG: add(p, st)
             default: break   // symlinks and special files take no meaningful space

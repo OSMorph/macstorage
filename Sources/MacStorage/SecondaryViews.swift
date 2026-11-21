@@ -233,7 +233,7 @@ struct CleanupView: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        if let s = model.snapshot, let plan = model.plan() {
+        if let s = model.snapshot, let plan = model.currentPlan {
             let acc = Accounting(s, cleaned: Set(model.cleaned.keys))
             VStack(spacing: 0) {
                 List {

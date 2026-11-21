@@ -42,10 +42,13 @@ public struct CleanupExecutor: Sendable {
     /// quits before it finishes.
     public static let interrupted = "The app quit while this step was running, so its outcome wasn't recorded. Scan again to see what's left."
 
+    public static let notJournaled = "The cleanup record couldn't be saved, so the app stopped before changing anything else."
+
     /// Runs the plan step by step. `journal` receives the record so far before each step
-    /// (the step about to run marked as interrupted), so it can be saved in case the app quits.
+    /// (the step about to run marked as interrupted), so it can be saved in case the app
+    /// quits. When it returns false (the record couldn't be saved), no further step starts.
     public func run(_ plan: CleanupPlan, stop: StopSignal, progress: @Sendable (Int, StepOutcome?) -> Void = { _, _ in },
-                    journal: @Sendable (RunRecord) -> Void = { _ in }) async -> RunRecord {
+                    journal: @Sendable (RunRecord) -> Bool = { _ in true }) async -> RunRecord {
         let id = UUID(), started = Date()
         var results: [RunRecord.StepResult] = []
         var haltReason: String?
@@ -57,7 +60,11 @@ public struct CleanupExecutor: Sendable {
             let pending = plan.steps[i...].enumerated().map { n, s in
                 RunRecord.StepResult(step: s, outcome: n == 0 ? .failed(error: Self.interrupted) : .notRun(reason: "The app quit before this step started."))
             }
-            journal(RunRecord(id: id, started: started, finished: Date(), steps: results + pending))
+            guard journal(RunRecord(id: id, started: started, finished: Date(), steps: results + pending)) else {
+                haltReason = Self.notJournaled
+                results.append(.init(step: step, outcome: .notRun(reason: Self.notJournaled)))
+                continue
+            }
             progress(i, nil)
             let result = await perform(step, previewTime: plan.previewTime)
             results.append(result)
@@ -222,12 +229,18 @@ public struct CleanupExecutor: Sendable {
             let type = step.item.kind == .dockerBuildCache ? "Build Cache" : "Images"
             return Parse.dockerSystemDF(out.stdout).first { $0.type == type }?.size
         case .homebrewOldVersions, .simulatorsUnavailable:
-            // What's still there of the approved targets. Simulators are listed by UDID,
-            // each a folder in the item's folder.
+            // The approved targets' real size now (nil if any walk is incomplete).
+            // Simulators are listed by UDID, each a folder in the item's folder.
             let folder = step.item.kind == .simulatorsUnavailable ? step.item.path : nil
-            return step.approvedTargets.reduce(Int64(0)) { sum, t in
-                let path = folder.map { $0 + "/" + t.id } ?? expand(t.id)
-                return FileManager.default.fileExists(atPath: path) ? sum + (t.bytes ?? 0) : sum
+            let paths = step.approvedTargets.map { t in folder.map { $0 + "/" + t.id } ?? expand(t.id) }
+            return await offload { () -> Int64? in
+                var total: Int64 = 0
+                for path in paths where FileSizes.identity(path) != nil {
+                    let size = FileSizes.measure(path)
+                    guard size.isComplete else { return nil }
+                    total += size.privateBytes
+                }
+                return total
             }
         default:
             return nil

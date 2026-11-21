@@ -162,7 +162,7 @@ public struct DockerProvider: Provider {
                                           detail: "Couldn't list \(failed.joined(separator: "; ")), so those items aren't shown; their space is still in the engine's total."))
         }
         let owner = Owner(id: "docker:\(context)", name: engineName, kind: .developerTools,
-                          location: dataFolder.map(ctx.display) ?? "context \(context)", note: note, hostBytes: hostBytes,
+                          location: dataFolder.map(ctx.display) ?? "context \(context)", note: note, hostBytes: hostBytes, hostSizeUnknown: disk == nil,
                           items: facts.map(Rules.item))
         return (owner, coverage)
     }

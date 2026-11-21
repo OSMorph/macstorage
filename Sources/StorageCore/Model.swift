@@ -276,11 +276,14 @@ public struct Owner: Codable, Identifiable, Equatable, Sendable {
     /// a container engine's VM disk, whose items are sized inside the VM. When the disk
     /// file can't be found, the sum of the items stands in, as a lower bound.
     public var hostBytes: Int64?
+    /// True when the owner occupies a VM disk on the Mac that couldn't be measured, so
+    /// the sum of its items stands in.
+    public var hostSizeUnknown: Bool?
     public var items: [Item]
 
     /// Item IDs are namespaced with the owner's ID, so two engines or apps never share one.
     public init(id: String, name: String, kind: OwnerKind, location: String, note: String? = nil,
-                isOwnVolume: Bool = false, hostBytes: Int64? = nil, items: [Item]) {
+                isOwnVolume: Bool = false, hostBytes: Int64? = nil, hostSizeUnknown: Bool = false, items: [Item]) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -288,6 +291,7 @@ public struct Owner: Codable, Identifiable, Equatable, Sendable {
         self.note = note
         self.isOwnVolume = isOwnVolume
         self.hostBytes = hostBytes
+        self.hostSizeUnknown = hostSizeUnknown ? true : nil
         self.items = items.map { item in
             var item = item
             if !item.id.hasPrefix(id + "/") { item.id = id + "/" + item.id }
@@ -296,4 +300,12 @@ public struct Owner: Codable, Identifiable, Equatable, Sendable {
     }
 
     public var onDisk: Int64 { hostBytes ?? items.compactMap(\.onDisk.bytes).reduce(0, +) }
+
+    /// `onDisk`, marked as a lower bound when an item's size is, or when the VM disk the
+    /// items live in couldn't be measured.
+    public var onDiskMeasure: Measure {
+        guard hostBytes == nil else { return .bytes(onDisk) }
+        let partial = hostSizeUnknown == true || items.contains { if case .atLeast = $0.onDisk { true } else { false } }
+        return partial ? .atLeast(onDisk) : .bytes(onDisk)
+    }
 }

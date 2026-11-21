@@ -25,19 +25,30 @@ public struct HistoryStore: Sendable {
 
     public func loadSnapshot() -> Snapshot? { load(snapshotURL) }
 
-    /// The history, or an empty one if there is none yet. A file that exists but can't be
-    /// read is moved aside (never overwritten), so a format change or damage loses nothing.
-    public func loadHistory() -> History {
-        Self.lock.withLock { unlockedHistory() }
+    public enum StoreError: Error, LocalizedError {
+        case unreadableHistoryNotPreserved
+
+        public var errorDescription: String? {
+            "history.json can't be read and couldn't be set aside, so the app won't overwrite it"
+        }
     }
 
-    private func unlockedHistory() -> History {
+    /// The history, or an empty one if there is none yet (or it can't be read).
+    public func loadHistory() -> History {
+        Self.lock.withLock { (try? unlockedHistory()) ?? History() }
+    }
+
+    /// A file that exists but can't be read is moved aside under a unique name, never
+    /// overwritten, so a format change or damage loses nothing. If it can't be set aside,
+    /// this throws, and saving stops rather than replacing it.
+    private func unlockedHistory() throws -> History {
         guard FileManager.default.fileExists(atPath: historyURL.path) else { return History() }
         if let history: History = load(historyURL) { return history }
-        let aside = folder.appending(path: "history-unreadable-\(Int(Date().timeIntervalSince1970)).json")
-        if (try? FileManager.default.moveItem(at: historyURL, to: aside)) == nil {
-            // Couldn't move it: don't let the next save overwrite it.
-            try? FileManager.default.copyItem(at: historyURL, to: aside)
+        let aside = folder.appending(path: "history-unreadable-\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(8)).json")
+        do {
+            try FileManager.default.moveItem(at: historyURL, to: aside)
+        } catch {
+            throw StoreError.unreadableHistoryNotPreserved
         }
         return History()
     }
@@ -45,7 +56,7 @@ public struct HistoryStore: Sendable {
     public func save(_ snapshot: Snapshot) throws {
         try write(snapshot, to: snapshotURL)
         try Self.lock.withLock {
-            var history = unlockedHistory()
+            var history = try unlockedHistory()
             history.scans.append(ScanSummary(snapshot))
             try write(history, to: historyURL)
         }
@@ -53,18 +64,36 @@ public struct HistoryStore: Sendable {
 
     /// Adds or replaces a cleanup run (a run is updated when its steps finish and when
     /// items are later deleted from the Trash): the full record, then the compact copy in
-    /// the history, then the receipt. Returns the receipt's location.
+    /// the history, then the receipt (unless `receipt` is false, as for the journal).
+    ///
+    /// A compact copy never replaces the full record: only its later Trash deletions are
+    /// carried over to it.
     @discardableResult
-    public func save(_ run: RunRecord) throws -> URL {
-        try write(run, to: runURL(run.id))
+    public func save(_ run: RunRecord, receipt: Bool = true) throws -> URL? {
+        var run = run
+        if run.isCompact {
+            guard var full = fullRun(run.id) else {
+                try saveCompact(run)
+                return nil
+            }
+            full.trashDeletions = run.trashDeletions
+            run = full
+        }
+        var record = run
+        for i in record.steps.indices { record.steps[i].step.item.targets = [] }   // the approved list is what matters
+        try write(record, to: runURL(run.id))
+        try saveCompact(run)
+        return receipt ? try writeReceipt(run) : nil
+    }
+
+    private func saveCompact(_ run: RunRecord) throws {
         try Self.lock.withLock {
-            var history = unlockedHistory()
+            var history = try unlockedHistory()
             history.runs.removeAll { $0.id == run.id }
-            history.runs.append(Self.compacted(run))
+            history.runs.append(run.isCompact ? run : Self.compacted(run))
             history.runs.sort { $0.started > $1.started }
             try write(history, to: historyURL)
         }
-        return try writeReceipt(run)
     }
 
     /// The run in full, or nil if only the compact copy survives.
@@ -83,6 +112,7 @@ public struct HistoryStore: Sendable {
     /// kept in full: deleting them from the Trash later needs them.
     static func compacted(_ run: RunRecord, limit: Int = 200) -> RunRecord {
         var run = run
+        run.isCompact = true
         for i in run.steps.indices {
             run.steps[i].step.item.targets = []
             if run.steps[i].step.approvedTargets.count > limit {
@@ -99,7 +129,7 @@ public struct HistoryStore: Sendable {
 
     private func receiptURL(_ run: RunRecord) -> URL {
         folder.appending(path: "Receipts", directoryHint: .isDirectory)
-            .appending(path: "Cleanup \(run.started.formatted(.iso8601).replacingOccurrences(of: ":", with: ".")).txt")
+            .appending(path: "Cleanup \(run.started.formatted(.iso8601).replacingOccurrences(of: ":", with: ".")) \(run.id.uuidString.prefix(8)).txt")
     }
 
     private func writeReceipt(_ run: RunRecord) throws -> URL {

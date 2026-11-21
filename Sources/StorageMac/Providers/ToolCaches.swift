@@ -92,7 +92,8 @@ public struct LanguageCachesProvider: Provider {
         }
 
         let asked = [await goMod, await goBuild, await npm, await uv, await pip]
-        let failures = asked.compactMap(\.1)
+        var failures = asked.compactMap(\.1)
+        if pnpmRoot == nil, ctx.tools.isInstalled("pnpm") { failures.append(ctx.unavailable("pnpm", area: "pnpm store", what: "pnpm")) }
         let go = [asked[0].0, asked[1].0].compactMap { $0 }
         let node = [asked[2].0, pnpm, await folder(ctx, .voltaToolchains, "~/.volta")].compactMap { $0 }
         let python = [asked[3].0, asked[4].0, await folder(ctx, .poetryCache, "~/Library/Caches/pypoetry"), await folder(ctx, .pyenvVersions, "~/.pyenv/versions")].compactMap { $0 }

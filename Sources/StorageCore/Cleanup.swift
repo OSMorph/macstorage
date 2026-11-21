@@ -176,6 +176,13 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
     public var finished: Date
     public var steps: [StepResult]
     public var trashDeletions: [TrashDeletion]
+    /// True for the compact copy History keeps (target lists and commands shortened).
+    /// The full record is stored separately.
+    public var isCompact: Bool {
+        get { compact ?? false }
+        set { compact = newValue ? true : nil }
+    }
+    private var compact: Bool?
 
     public init(id: UUID = UUID(), started: Date, finished: Date, steps: [StepResult], trashDeletions: [TrashDeletion] = []) {
         self.id = id
@@ -228,6 +235,18 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+extension ItemKind {
+    /// How "measured" is measured, when it's wider than the step's own targets.
+    public var measurementNote: String? {
+        switch self {
+        case .nixDeadPaths: "as the change in the whole /nix volume"
+        case .dockerBuildCache: "as the change in the engine's whole build cache"
+        case .dockerUnusedImages: "as the change in all the engine's images"
+        default: nil
+        }
+    }
+}
+
 public enum Receipt {
     /// The plain-text receipt, the same in History and in the saved file. Each step leads
     /// with its outcome, then what ran, what moved, what was left alone, and the approved list.
@@ -236,7 +255,7 @@ public enum Receipt {
                      "Started \(run.started.formatted(date: .abbreviated, time: .shortened)), \(run.progressText)", ""]
         for r in run.steps {
             let s = r.step, title = "\(s.ownerName) · \(s.item.name)"
-            let freed = { (m: Int64?) in m.map { "\(ByteFormat.string($0)) \(s.destination == .trash ? "moved to the Trash" : s.destination == .containerDisk ? "freed inside Docker's disk" : "freed"), measured" }
+            let freed = { (m: Int64?) in m.map { "\(ByteFormat.string($0)) \(s.destination == .trash ? "moved to the Trash" : s.destination == .containerDisk ? "freed inside Docker's disk" : "freed"), measured" + (s.item.kind.measurementNote.map { " " + $0 } ?? "") }
                 ?? "predicted \(ByteFormat.string(s.expectedBytes)), not re-measured" }
             switch r.outcome {
             case .done(let m): lines.append("DONE · \(title) · \(freed(m))" + (m == nil ? "" : " (predicted \(ByteFormat.string(s.expectedBytes)))"))

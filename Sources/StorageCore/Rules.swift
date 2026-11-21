@@ -122,7 +122,8 @@ public enum Rules {
             return Rule(name: "Images no container uses", tier: .probablySafe,
                         why: "\(f.count("unused")) of \(f.count("total")) images have no container. They download or rebuild when needed. The app removes exactly the approved tags (or IDs for untagged images), Docker refuses any image a container has started using since.",
                         basis: "Right before running, the app checks that each tag still points at the image you reviewed and that the context still reaches the same engine, and skips the step if not. Images share layers, so the space freed is at most the figure shown.",
-                        action: .runOnTargets(docker(["image", "rm"]), .containerDisk), unit: "image")
+                        // --no-prune: untagged parent images go only if they were approved too.
+                        action: .runOnTargets(docker(["image", "rm", "--no-prune"]), .containerDisk), unit: "image")
         case .dockerStoppedContainers:
             return Rule(name: "Stopped containers", tier: .review,
                         why: "\(f.count("stopped")) of \(f.count("total")) containers are stopped. A stopped container can still hold files written inside it, and Docker deletes containers immediately, so the app never removes them for you: check the list and run the command yourself.",
@@ -150,13 +151,13 @@ public enum Rules {
                         why: "Downloaded dependencies, plus anything installed locally with mvn install, which can't be downloaded again. Only you know which of those you still need.",
                         action: .userActsInApp("Delete folders of artifacts you no longer build against in Finder"))
         case .dockerDiskSlack:
-            return Rule(name: "VM disk space not used by contents", tier: .notRemovable,
-                        why: "The VM disk holds more than its contents add up to. The difference is space the engine hasn't handed back to macOS yet; the disk file shrinks when the engine trims it.")
+            return Rule(name: "VM system and unclaimed space", tier: .notRemovable,
+                        why: "The VM disk holds more than its images, containers, volumes and caches add up to: the VM's own system and logs, and space the engine hasn't handed back to macOS yet. The unclaimed part comes back when the engine trims its disk; the rest is needed to run it.")
         case .podmanUnusedImages:
             return Rule(name: "Images no container uses", tier: .probablySafe,
                         why: "\(f.count("unused")) of \(f.count("total")) images have no container, running or stopped. They download or rebuild when needed. The app removes exactly the approved names (or IDs for untagged images); Podman refuses any image a container has started using since.",
                         basis: "Right before running, the app checks that each name still points at the image you reviewed and that the connection still reaches the same machine, and skips the step if not. Images share layers, so the space freed is at most the figure shown.",
-                        action: .runOnTargets(podman(["image", "rm"]), .containerDisk), unit: "image")
+                        action: .runOnTargets(podman(["image", "rm", "--no-prune"]), .containerDisk), unit: "image")
         case .podmanStoppedContainers:
             return Rule(name: "Stopped containers", tier: .review,
                         why: "\(f.count("stopped")) of \(f.count("total")) containers are stopped. A stopped container can still hold files written inside it, and Podman deletes containers immediately, so the app never removes them for you: check the list and run the command yourself.",

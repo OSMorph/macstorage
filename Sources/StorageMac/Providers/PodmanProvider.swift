@@ -14,7 +14,11 @@ public struct PodmanProvider: Provider {
         guard ctx.tools.isInstalled("podman") else {
             return ProviderResult(coverage: [CoverageEntry(area: area, status: .skipped, detail: "Podman isn't installed.")])
         }
-        guard let listing = await ctx.output("podman", ["machine", "list", "--format", "json"]), let machines = Parse.jsonArray(listing) else {
+        // Podman 5.3+ lists every provider's machines with --all-providers; older versions
+        // know one provider and don't accept the flag.
+        let allProviders = await ctx.output("podman", ["machine", "list", "--all-providers", "--format", "json"])
+        guard let listing = await allProviders.asyncFallback({ await ctx.output("podman", ["machine", "list", "--format", "json"]) }),
+              let machines = Parse.jsonArray(listing) else {
             return ProviderResult(coverage: [ctx.unavailable("podman", area: area, what: "Podman")])
         }
         guard !machines.isEmpty else {
@@ -42,13 +46,17 @@ public struct PodmanProvider: Provider {
             }
             // The rootless connection is the machine's name; the rootful one adds "-root".
             var facts: [Fact] = [], contents: Int64 = 0, problems: [String] = []
+            // Only connections Podman made for a machine on this Mac are asked: a connection
+            // with the same name to another host, or a rootful one aliasing the rootless
+            // socket, is skipped.
+            var asked = Set<String>()
             for (connection, rootful) in [(name, false), (name + "-root", true)] {
-                guard let uri = connections[connection] else { continue }
+                guard let uri = connections[connection].flatMap(Self.localMachineURI), asked.insert(uri).inserted else { continue }
                 let found = await engine(ctx, connection: connection, uri: uri, rootful: rootful)
                 problems += found.problems
                 contents += found.contents
                 // The rootful store is usually empty; it's only shown when it holds something.
-                if !rootful || found.contents > 0 { facts += found.facts }
+                if !rootful || found.contents > 0 || found.facts.contains(where: { !$0.targets.isEmpty }) { facts += found.facts }
             }
             if facts.isEmpty, problems.isEmpty {
                 problems.append("no connection named \(name) answered")
@@ -107,16 +115,25 @@ public struct PodmanProvider: Provider {
         return (facts, usage.values.map(\.size).reduce(0, +), problems)
     }
 
-    /// Connection names and their addresses, from `podman system connection list --format json`.
-    static func connections(_ json: String) -> [String: String] {
-        Dictionary((Parse.jsonArray(json) ?? []).compactMap { c in c["Name"].flatMap { name in c["URI"].map { (name, $0) } } },
-                   uniquingKeysWith: { a, _ in a })
+    /// Connections by name, from `podman system connection list --format json`.
+    static func connections(_ json: String) -> [String: [String: String]] {
+        Dictionary((Parse.jsonArray(json) ?? []).compactMap { c in c["Name"].map { ($0, c) } }, uniquingKeysWith: { a, _ in a })
     }
 
-    /// The address a connection points at now, or nil if it's gone or can't be listed.
+    /// The connection's address when it reaches a machine on this Mac: one Podman made for
+    /// a machine (`IsMachine`, where the version reports it), over a local socket or SSH to
+    /// this Mac itself. Nil for anything else.
+    static func localMachineURI(_ connection: [String: String]) -> String? {
+        guard connection["IsMachine"] != "false", let uri = connection["URI"], let url = URL(string: uri) else { return nil }
+        let local = url.scheme == "unix" || ["127.0.0.1", "localhost", "::1", "[::1]"].contains(url.host ?? "")
+        return local ? uri : nil
+    }
+
+    /// The local machine address a connection points at now, or nil if it's gone, points
+    /// elsewhere, or can't be listed.
     static func connectionURI(_ name: String, tools: any ToolRunning) async -> String? {
         guard let out = try? await tools.run("podman", ["system", "connection", "list", "--format", "json"], timeout: .seconds(20)), out.succeeded else { return nil }
-        return connections(out.stdout)[name]
+        return connections(out.stdout)[name].flatMap(localMachineURI)
     }
 
     /// The machine's disk file: Podman keeps it in a folder per VM type, named after the
@@ -148,5 +165,10 @@ private extension Optional {
     func asyncMap<T>(_ transform: (Wrapped) async -> T) async -> T? {
         guard let self else { return nil }
         return await transform(self)
+    }
+
+    func asyncFallback(_ other: () async -> Wrapped?) async -> Wrapped? {
+        if let self { return self }
+        return await other()
     }
 }

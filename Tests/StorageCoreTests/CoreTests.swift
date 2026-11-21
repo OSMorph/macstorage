@@ -23,8 +23,11 @@ final class RulesTests: XCTestCase {
     func testPodmanCommandsNameTheirConnection() {
         let images = Rules.item(Fact(.podmanUnusedImages, onDisk: .bytes(2), reclaimable: .bytes(1), targets: [Target("app:1")], root: "dev"))
         guard case .runOnTargets(let command, .containerDisk) = images.action else { return XCTFail("\(images.action)") }
-        XCTAssertEqual(command, Command("podman", ["--connection", "dev", "image", "rm"]))
+        XCTAssertEqual(command, Command("podman", ["--connection", "dev", "image", "rm", "--no-prune"]), "no unapproved parent images")
         XCTAssertTrue(images.reclaimableIsUpperBound, "images share layers")
+        let docker = Rules.item(Fact(.dockerUnusedImages, onDisk: .bytes(2), reclaimable: .bytes(1), targets: [Target("app:1")], root: "c"))
+        guard case .runOnTargets(let dockerCommand, _) = docker.action else { return XCTFail("\(docker.action)") }
+        XCTAssertEqual(dockerCommand.arguments.suffix(3), ["image", "rm", "--no-prune"])
         let volumes = Rules.item(Fact(.podmanUnusedVolumes, onDisk: .bytes(1), targets: [Target("v")], root: "dev"))
         guard case .userRunsCommand(let cmd, false) = volumes.action else { return XCTFail("\(volumes.action)") }
         XCTAssertEqual(cmd, "podman --connection dev volume rm v")

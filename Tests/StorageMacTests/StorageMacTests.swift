@@ -393,6 +393,18 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertFalse(tools.calls.contains { $0.contains("image rm") })
     }
 
+    func testAMachineWhosePortChangedIsRefused() async {
+        // Same connection address, but the machine now listens elsewhere: it's another VM.
+        let tools = FakeTools([
+            { $0.contains("connection list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","URI":"ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock","IsMachine":true}]"#) : nil },
+            { $0.contains("machine list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","Running":true,"Port":50123,"RemoteUsername":"core"}]"#) : nil },
+            { $0.contains("image inspect") ? ToolOutput(status: 0, stdout: "aaa\n") : nil },
+        ])
+        let result = await executor(tools).perform(podmanImagesStep([Target("localhost/app:1", fingerprint: "aaa")]), previewTime: .now)
+        guard case .skipped = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertFalse(tools.calls.contains { $0.contains("image rm") })
+    }
+
     func testARetaggedPodmanImageIsNotRemoved() async {
         let tools = podmanTools(uri: "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock", images: "bbb\n")
         let result = await executor(tools).perform(podmanImagesStep([Target("localhost/app:1", fingerprint: "aaa")]), previewTime: .now)
@@ -467,7 +479,7 @@ final class CleanupSafetyTests: XCTestCase {
             { $0.contains("machine list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","Running":false,"VMType":"applehv"}]"#) : nil },
         ])
         let result = await PodmanProvider().scan(ScanContext(tools: tools, home: home.path, fullDiskAccess: true))
-        XCTAssertEqual(Set(result.owners.map(\.name)), ["Podman (dev)", "Podman machine disk (qemu)"])
+        XCTAssertEqual(Set(result.owners.map(\.name)), ["Podman (dev)", "Unlisted Podman machine disk (qemu)"])
         XCTAssertTrue(result.coverage.contains { $0.area == "Podman (other providers)" })
     }
 
@@ -567,7 +579,23 @@ final class CleanupSafetyTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: home) }
         FileManager.default.createFile(atPath: machine.appending(path: "qemu/dev_fedora-coreos-39.qcow2").path, contents: Data(repeating: 1, count: 110 << 20))
         let result = PodmanProvider.unlistedDisks(listed: [("dev", "applehv")], ScanContext(tools: FakeTools(), home: home.path, fullDiskAccess: true))
-        XCTAssertEqual(result.owners.map(\.name), ["Podman machine disk (qemu)"], "applehv's dev says nothing about qemu's")
+        XCTAssertEqual(result.owners.map(\.name), ["Unlisted Podman machine disk (qemu)"], "applehv's dev says nothing about qemu's")
+    }
+
+    func testAStartingMachineIsLeftAlone() async throws {
+        let home = FileManager.default.temporaryDirectory.appending(path: "podman-home-\(UUID().uuidString)")
+        let folder = home.appending(path: ".local/share/containers/podman/machine/applehv")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        FileManager.default.createFile(atPath: folder.appending(path: "dev-arm64.raw").path, contents: Data(repeating: 1, count: 1 << 20))
+        let tools = FakeTools([
+            // No VM type reported: the disk is looked for under every provider's folder.
+            { $0.contains("machine list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","Running":false,"Starting":true,"Port":50000,"RemoteUsername":"core"}]"#) : nil },
+        ])
+        let result = await PodmanProvider().scan(ScanContext(tools: tools, home: home.path, fullDiskAccess: true))
+        XCTAssertEqual(result.owners.first?.items.map(\.kind), [.podmanVMDisk])
+        XCTAssertTrue(result.owners.first?.note?.hasPrefix("Starting") == true)
+        XCTAssertFalse(tools.calls.contains { $0.contains("--connection") })
     }
 
     func testStoppedContainersLeaveOutRunningPausedAndPodInfra() async throws {

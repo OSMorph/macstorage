@@ -37,8 +37,8 @@ public struct PodmanProvider: Provider {
             // The same name can exist under two providers (applehv and libkrun).
             let id = names.filter { $0 == name }.count > 1 ? "podman:\(vmType):\(name)" : "podman:\(name)"
             let title = name == "podman-machine-default" ? "Podman" : "Podman (\(name))"
-            let disk = Self.vmDisk(name, vmType: vmType, others: names, ctx)
-            let onMac = await disk.asyncMap { path in await offload { FileSizes.measure(path).allocated } }
+            let found = await offload { Self.vmDisk(name, vmType: vmType, others: names, ctx) }
+            let disk = found?.path, onMac = found?.allocated
             let location = disk.map { ctx.display(($0 as NSString).deletingLastPathComponent) } ?? "machine \(name)"
             /// Only the disk file, for a machine the app can't look inside.
             func diskOnly(_ why: String, _ coverage: CoverageEntry) {
@@ -59,7 +59,7 @@ public struct PodmanProvider: Provider {
             // The rootless connection is named after the machine; the rootful one adds
             // "-root". Only connections to a machine on this Mac are asked: one with the
             // same name to another host, or a rootful one aliasing the rootless socket, isn't.
-            var facts: [Fact] = [], contents: Int64 = 0, problems: [String] = [], asked = Set<String>(), allSized = true
+            var facts: [Fact] = [], contents: Int64 = 0, problems: [String] = [], asked = Set<String>(), askedNames: [String] = [], allSized = true
             for (connection, rootful) in [(name, false), (name + "-root", true)] where connections[connection] != nil {
                 guard let uri = connections[connection].flatMap({ Self.machineURI($0, of: machine, rootful: rootful) }),
                       // A destination already measured, for this machine or another, isn't again.
@@ -70,6 +70,7 @@ public struct PodmanProvider: Provider {
                     continue
                 }
                 asked.insert(uri)
+                askedNames.append(connection)
                 let found = await engine(ctx, connection: connection, uri: uri, machine: name, rootful: rootful)
                 problems += found.problems
                 contents += found.contents ?? 0
@@ -95,7 +96,7 @@ public struct PodmanProvider: Provider {
             result.owners.append(Owner(id: id, name: title, kind: .developerTools, location: location, note: note,
                                        hostBytes: onMac, hostSizeUnknown: disk == nil, items: facts.map(Rules.item)))
             result.coverage.append(problems.isEmpty
-                ? CoverageEntry(area: title, status: .measured, detail: "Running; measured through the \(name) connection.")
+                ? CoverageEntry(area: title, status: .measured, detail: "Running; measured through \(askedNames.joined(separator: " and ")).")
                 : CoverageEntry(area: title, status: .failed, detail: "Running, but \(problems.joined(separator: "; ")). What those would have listed isn't shown."))
         }
         return result
@@ -189,9 +190,10 @@ public struct PodmanProvider: Provider {
     /// leads to the named machine, or can't be listed.
     static func connectionURI(_ name: String, machine: String, rootful: Bool, tools: any ToolRunning) async -> String? {
         guard let out = try? await tools.run("podman", ["system", "connection", "list", "--format", "json"], timeout: .seconds(20)), out.succeeded,
-              let machine = await machines(tools)?.machines.first(where: { $0["Name"].map { $0.hasSuffix("*") ? String($0.dropLast()) : $0 } == machine })
-        else { return nil }
-        return connections(out.stdout)[name].flatMap { machineURI($0, of: machine, rootful: rootful) }
+              let connection = connections(out.stdout)[name], let listed = await machines(tools)?.machines else { return nil }
+        // Two providers can each have a machine of this name: the connection must lead to one.
+        return listed.filter { $0["Name"].map { $0.hasSuffix("*") ? String($0.dropLast()) : $0 } == machine }
+            .lazy.compactMap { machineURI(connection, of: $0, rootful: rootful) }.first
     }
 
     /// Disk files of machines `podman machine list` didn't mention (another provider's,
@@ -209,21 +211,21 @@ public struct PodmanProvider: Provider {
                 let path = folder + "/" + file, onMac = FileSizes.measure(path).allocated
                 // Machine disks are gigabytes; a small stray image file isn't one.
                 guard onMac >= 100_000_000 else { continue }
-                result.owners.append(Owner(id: "podman:\(type):\(file)", name: "Podman machine disk (\(type))", kind: .developerTools, location: ctx.display(folder),
-                                           note: "A \(type) machine's disk. Podman didn't list every provider's machines, so the app didn't ask about it.",
+                result.owners.append(Owner(id: "podman:\(type):\(file)", name: "Unlisted Podman machine disk (\(type))", kind: .developerTools, location: ctx.display(folder),
+                                           note: "A \(type) machine's disk that Podman didn't list, so the app didn't ask about it.",
                                            hostBytes: onMac, items: [Rules.item(Fact(.podmanVMDisk, onDisk: .bytes(onMac), path: path))]))
             }
         }
         if !result.owners.isEmpty {
             result.coverage.append(CoverageEntry(area: "Podman (other providers)", status: .notMeasured,
-                                                 detail: "Podman didn't list every provider's machines (--all-providers needs 5.3); \(plural(result.owners.count, "disk file")) of other providers' machines were measured as files."))
+                                                 detail: "Podman didn't list every provider's machines; \(plural(result.owners.count, "disk file")) of machines it didn't list were measured as files."))
         }
         return result
     }
 
     /// The machine's disk file: Podman keeps it in a folder per VM type, named after the
     /// machine ("podman-machine-default-arm64.raw"; older versions "…_fedora-coreos-….qcow2").
-    static func vmDisk(_ machine: String, vmType: String, others: [String], _ ctx: ScanContext) -> String? {
+    static func vmDisk(_ machine: String, vmType: String, others: [String], _ ctx: ScanContext) -> (path: String, allocated: Int64)? {
         let root = ctx.expand("~/.local/share/containers/podman/machine")
         let types = vmType.isEmpty ? ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []) : [vmType]
         return types.flatMap { type -> [String] in
@@ -231,8 +233,8 @@ public struct PodmanProvider: Provider {
             return ((try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? [])
                 .filter { isDisk($0, of: machine, others: others) }.map { folder + "/" + $0 }
         }
-        .map { ($0, FileSizes.measure($0).allocated) }
-        .max { $0.1 < $1.1 }?.0
+        .map { (path: $0, allocated: FileSizes.measure($0).allocated) }
+        .max { $0.allocated < $1.allocated }
     }
 
     /// True for a disk image file named after `machine`, and not after another machine
@@ -243,12 +245,5 @@ public struct PodmanProvider: Provider {
         let stem = (file as NSString).deletingPathExtension
         let named = { (m: String) in stem == m || stem.hasPrefix(m + "-") || stem.hasPrefix(m + "_") }
         return named(machine) && !others.contains { $0.count > machine.count && named($0) }
-    }
-}
-
-private extension Optional {
-    func asyncMap<T>(_ transform: (Wrapped) async -> T) async -> T? {
-        guard let self else { return nil }
-        return await transform(self)
     }
 }

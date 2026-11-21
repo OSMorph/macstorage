@@ -168,7 +168,7 @@ public enum Rules {
                         action: .userRunsCommand(([podman(["volume", "rm"]).display()] + f.targets.map(\.id)).joined(separator: " "), needsAdmin: false), unit: "volume")
         case .podmanVMDisk:
             return Rule(name: "VM disk", tier: .leaveAlone,
-                        why: "The app couldn't look inside this Podman machine: it isn't running, or Podman didn't answer through a connection on this Mac. The app never starts a machine itself. Start the machine (or check “podman system connection list”) and scan again to see its images and volumes.")
+                        why: "The app couldn't look inside this Podman machine: it isn't running (or still starting), Podman didn't list it, or Podman didn't answer through a connection on this Mac. The app never starts a machine itself. Once it's running and listed by “podman machine list”, scan again to see its images and volumes.")
         case .goModuleCache:
             return Rule(name: "Module cache", tier: .safe, why: "Downloaded module sources. Go downloads them again on the next build.",
                         basis: rootCheck, action: .clearFolder(Command("go", ["clean", "-modcache"]), root: root, .mac), unit: "module version")

@@ -128,8 +128,8 @@ public struct DockerProvider: Provider {
             let ref = "\(img["Repository"] ?? ""):\(img["Tag"] ?? "")"
             return !usedImages.contains(img["ID"] ?? "") && !usedImages.contains(ref) && !usedImages.contains(img["Repository"] ?? "")
         }
-        // Stopped ones only: `docker rm` refuses running, paused and restarting containers.
-        let stopped = containers.filter { !["running", "paused", "restarting"].contains($0["State"] ?? "") }
+        // Stopped ones only: `docker rm` refuses running, paused, restarting and removing ones.
+        let stopped = containers.filter { !["running", "paused", "restarting", "removing"].contains($0["State"] ?? "") }
         let volumeListing = await ctx.output("docker", d + ["volume", "ls", "--filter", "dangling=true", "--format", "{{json .}}"])
         let volumes = Parse.jsonLines(volumeListing ?? "")
         // The builder named after the context is the engine's own; listing and pruning both use it.

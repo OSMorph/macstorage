@@ -10,21 +10,24 @@ A macOS app that shows where disk space goes on a developer Mac in more detail t
 
 The design is in [docs/PLAN.md](docs/PLAN.md).
 
-## Status
-
-Early. The only thing that exists so far is the **M0 probe** (`spikes/m0-probe/`), a throwaway app that checks what is possible on a real (possibly MDM-managed) Mac: whether a downloaded self-signed app runs, whether Full Disk Access survives updates, how APFS reports clone and sparse-file sizes, and where each tool keeps its data. It produces an anonymized report.
-
-### Trying the probe
+## Install
 
 1. In Terminal, download and install it in one go (replace the version with the latest from [Releases](../../releases)):
    ```sh
-   v=0.1.0; curl -fsSL "https://github.com/OSMorph/macstorage/releases/download/probe-v$v/MacStorageProbe-$v.zip" -o /tmp/probe.zip \
-     && rm -rf /Applications/MacStorageProbe.app && ditto -x -k /tmp/probe.zip /Applications && open /Applications/MacStorageProbe.app
+   v=0.1.0; curl -fsSL "https://github.com/OSMorph/macstorage/releases/download/v$v/MacStorage-$v.zip" -o /tmp/macstorage.zip \
+     && rm -rf /Applications/MacStorage.app && ditto -x -k /tmp/macstorage.zip /Applications && open /Applications/MacStorage.app
    ```
-2. That's needed because the app is self-signed, not notarized by Apple. A browser download gets a quarantine mark, and macOS then says "Apple could not verify…" and refuses to open it. `curl` doesn't add that mark. If you did download it in a browser, run `xattr -dr com.apple.quarantine /Applications/MacStorageProbe.app`, or click **Open Anyway** in System Settings → Privacy & Security.
-3. Follow the three steps in the window.
+   The app is self-signed, not notarized by Apple. A browser download gets a quarantine mark, and macOS then says "Apple could not verify…" and won't open it. `curl` doesn't add that mark. If you did download it in a browser, run `xattr -dr com.apple.quarantine /Applications/MacStorage.app`, or click **Open Anyway** in System Settings → Privacy & Security.
+2. In the app, follow the welcome screen: give it Full Disk Access (recommended), then scan.
+3. To update, run the same command with the new version. Full Disk Access should stay granted, because every release is signed with the same certificate (not yet confirmed across an update).
 
-It reads but doesn't change anything, apart from a small test folder in the temporary directory that it deletes again.
+Nothing is deleted until you've reviewed a cleanup preview. Personal files only ever go to the Trash, one by one. Every cleanup is recorded in History with a receipt.
+
+To try it without touching anything, launch it with sample data: `open /Applications/MacStorage.app --args --demo`.
+
+## Status
+
+Early (0.x). The scan, recommendations, cleanup and history work; see [docs/PLAN.md](docs/PLAN.md) for what's planned. The `spikes/m0-probe/` folder holds the throwaway probe that checked what's possible on a managed Mac; its releases are tagged `probe-v*`.
 
 ## A personal project
 

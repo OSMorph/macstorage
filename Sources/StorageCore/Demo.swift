@@ -94,6 +94,7 @@ public enum Demo {
                 FolderEntry(name: "Downloads", bytes: gb(64), kind: .personalFiles, owners: [OwnerShare(ownerID: "downloads", bytes: gb(64))]),
                 FolderEntry(name: "Developer", bytes: gb(10.7), kind: .developerTools, owners: [OwnerShare(ownerID: "git", bytes: gb(10.7))]),
                 FolderEntry(name: "go", bytes: gb(10.5), kind: .developerTools, owners: [OwnerShare(ownerID: "go", bytes: gb(10.5))]),
+                FolderEntry(name: "backup.tar", bytes: gb(2.4), kind: .personalFiles, isFolder: false),
             ],
             "~/Library": [
                 FolderEntry(name: "Containers", bytes: gb(52), kind: .developerTools, owners: [OwnerShare(ownerID: "docker", bytes: gb(50.1))]),

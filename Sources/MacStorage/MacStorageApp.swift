@@ -128,6 +128,11 @@ struct SnapshotTour {
             await shot("coverage-partial-scan", window)
             model.setSnapshot(full)
         }
+        model.section = .folders
+        model.openFolder("~/Library")
+        model.selectedFolder = "Caches"
+        await shot("folders-library", window)
+        model.openFolder("~")
         model.show(owner: "docker", item: "docker/dockerBuildCache")
         await shot("owners-docker", window)
         model.show(owner: "docker", item: "docker/dockerUnusedVolumes")

@@ -129,6 +129,8 @@ struct TreemapNode: Identifiable {
     var value: Double
     var reclaimable: Double
     var color: Color
+    /// How many entries the cell stands for (more than one for a "smaller" cell).
+    var count = 1
 }
 
 /// A squarified treemap. Cells are buttons with their own accessibility labels; slivers
@@ -177,10 +179,13 @@ struct Treemap: View {
         guard total > 0, area > 0 else { return [] }
         // One pass each way: a folder can have a hundred thousand entries.
         let threshold = total * 1_600 / area
-        let small = live.filter { $0.value < threshold }
+        // A "smaller" cell passed in joins the folded one, so there's only ever one.
+        let isSmall = { (n: TreemapNode) in n.value < threshold || n.id == smallerID }
+        let small = live.filter(isSmall)
         guard small.count > 1 else { return live }
-        return live.filter { $0.value >= threshold }
-            + [TreemapNode(id: smallerID, label: "\(small.count) smaller", value: small.map(\.value).reduce(0, +), reclaimable: 0, color: .gray)]
+        let count = small.map(\.count).reduce(0, +)
+        return live.filter { !isSmall($0) }
+            + [TreemapNode(id: smallerID, label: "\(count.formatted()) smaller", value: small.map(\.value).reduce(0, +), reclaimable: 0, color: .gray, count: count)]
     }
 
     /// Squarified layout (Bruls, Huizing, van Wijk).

@@ -6,6 +6,7 @@ import SwiftUI
 struct FoldersView: View {
     @Bindable var model: AppModel
     @State private var order = [KeyPathComparator(\FolderEntry.sortBytes, order: .reverse)]
+    @State private var filter = ""
 
     /// The table shows this many entries at most, the largest first: a folder can hold a
     /// hundred thousand.
@@ -14,25 +15,28 @@ struct FoldersView: View {
     var body: some View {
         if let s = model.snapshot {
             let level = model.folderLevel(model.folderPath)
-            let all = level?.entries ?? []
+            let entries = level?.entries ?? []
+            let all = filter.isEmpty ? entries : entries.filter { $0.name.localizedCaseInsensitiveContains(filter) }
             let rows = all.count > Self.rowLimit
                 ? Array(all.sorted { $0.sortBytes > $1.sortBytes }.prefix(Self.rowLimit)).sorted(using: order)
                 : all.sorted(using: order)
             HSplitView {
                 VStack(alignment: .leading, spacing: 8) {
-                    breadcrumbs
+                    HStack {
+                        breadcrumbs
+                        Spacer()
+                        TextField("Filter by name", text: $filter).textFieldStyle(.roundedBorder).frame(maxWidth: 200)
+                    }
                     Text("Select a folder to see its owners; double-click or Return opens it.").font(.caption).foregroundStyle(.secondary)
                     if s.folders[model.folderPath] == nil, let level {
                         levelStatus(level)
                     }
-                    // The treemap folds slivers into one cell; it gets the largest entries only.
-                    Treemap(nodes: rows.sorted { $0.sortBytes > $1.sortBytes }.prefix(200).compactMap { r in
-                                r.bytes.map { TreemapNode(id: r.name, label: r.name, value: Double($0), reclaimable: 0, color: r.kind.color) }
-                            },
-                            selected: model.selectedFolder) { model.selectedFolder = $0 }
+                    Treemap(nodes: treemapNodes(all), selected: model.selectedFolder) { model.selectedFolder = $0 }
                         .frame(height: 260)
-                    if all.isEmpty, level?.isMeasuring != true, level?.problem == nil {
+                    if entries.isEmpty, level?.isMeasuring != true, level?.problem == nil {
                         Callout(s.isPartial && model.folderPath == "~" ? "Folder sizes weren't measured: the scan stopped before they were." : "Nothing here takes space.")
+                    } else if all.isEmpty, !filter.isEmpty {
+                        Callout("Nothing here matches “\(filter)”.")
                     }
                     Table(rows, selection: $model.selectedFolder, sortOrder: $order) {
                         TableColumn("Name", value: \.name) { r in
@@ -56,7 +60,7 @@ struct FoldersView: View {
                     }
                     if all.count > rows.count {
                         let rest = all.count - rows.count
-                        Text("The \(Self.rowLimit.formatted()) largest are listed; \(rest.formatted()) smaller ones aren't.").font(.caption).foregroundStyle(.secondary)
+                        Text("The \(Self.rowLimit.formatted()) largest are listed; \(rest.formatted()) smaller ones aren't. Filter by name to find one.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 .padding(16).frame(minWidth: 480)
@@ -64,6 +68,15 @@ struct FoldersView: View {
                     .frame(minWidth: 280, idealWidth: 320)
             }
         }
+    }
+
+    /// The largest 200 entries, and the rest as one cell: the treemap folds slivers anyway.
+    private func treemapNodes(_ entries: [FolderEntry]) -> [TreemapNode] {
+        let sized = entries.filter { ($0.bytes ?? 0) > 0 }.sorted { $0.sortBytes > $1.sortBytes }
+        let nodes = sized.prefix(200).map { TreemapNode(id: $0.name, label: $0.name, value: Double($0.bytes ?? 0), reclaimable: 0, color: $0.kind.color) }
+        let rest = sized.dropFirst(200)
+        guard !rest.isEmpty else { return nodes }
+        return nodes + [TreemapNode(id: Treemap.smallerID, label: "\(rest.count.formatted()) smaller", value: Double(rest.compactMap(\.bytes).reduce(0, +)), reclaimable: 0, color: .gray, count: rest.count)]
     }
 
     /// Home › Library › Caches: every folder above this one opens with a click.

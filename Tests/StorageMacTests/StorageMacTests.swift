@@ -641,6 +641,18 @@ final class FolderMeasurementsTests: XCTestCase {
         XCTAssertNil(m.levels["~/A"], "its listing arriving late doesn't bring it back")
     }
 
+    @MainActor func testAFolderReplacedByALinkMidLevelStopsThere() async throws {
+        let fm = FileManager.default
+        let m = Disk(names: names, delay: 0.03).measurements(home: home.path)
+        m.open("~/A", owners: [], protected: [])
+        try await waitUntil { (m.levels["~/A"]?.measured ?? 0) >= 2 }
+        try fm.moveItem(at: home.appending(path: "A"), to: home.appending(path: "A-moved"))
+        try fm.createSymbolicLink(atPath: home.appending(path: "A").path, withDestinationPath: home.appending(path: "B").path)
+        try await waitUntil { m.levels["~/A"]?.problem != nil }
+        XCTAssertEqual(m.levels["~/A"]?.problem, .notAFolder)
+        XCTAssertNil(m.measuring)
+    }
+
     @MainActor func testARefusedFolderIsNeverRead() async throws {
         let disk = Disk(names: names)
         let m = disk.measurements(home: home.path)

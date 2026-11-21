@@ -179,8 +179,9 @@ public enum FolderAttribution {
     /// Why `path` (inside `home`) mustn't be read, or nil when it can be: it must be a real
     /// folder reached without following links, on the home folder's volume, and not inside
     /// a folder in `protected`. Checked right before listing; the walks below it never
-    /// follow links or leave the volume themselves. (A link swapped in between this check
-    /// and the listing would be listed once: same user, read only.)
+    /// follow links or leave the volume themselves. On-demand levels repeat it before each
+    /// entry, so a folder replaced by a link mid-level stops there. (What remains is a link
+    /// swapped in during one entry's walk: same user, read only.)
     public static func refusal(_ path: String, home: String, protected: Set<String>) -> Refusal? {
         var st = stat(), homeStat = stat()
         guard lstat(path, &st) == 0, st.st_mode & S_IFMT == S_IFDIR else { return .notAFolder }
@@ -201,6 +202,9 @@ public enum FolderAttribution {
     public static func entry(_ name: String, in path: String, owners: [Owner], _ options: WalkOptions) -> FolderEntry? {
         let full = path + "/" + name
         if options.excluding.contains(full) { return FolderEntry(name: name, bytes: nil, kind: .personalFiles, isFolder: true) }
+        // A volume mounted here isn't part of this disk: left out, never walked.
+        var st = stat(), parent = stat()
+        guard lstat(full, &st) == 0, lstat(path, &parent) == 0, st.st_dev == parent.st_dev else { return nil }
         let size = FileSizes.measure(full, options)
         // Nothing that takes no space; one that couldn't be read is kept, as a lower bound.
         guard size.allocated > 0 || !size.isComplete else { return nil }

@@ -115,7 +115,7 @@ public final class FolderMeasurements {
     /// every `flushInterval`, so a slow entry doesn't hold back those before it.
     private func measure(_ path: String, _ names: [String], owners: [Owner], protected: Set<String>, stop: StopSignal) {
         guard let id = levels[path]?.id else { return }
-        let full = absolute(path), measure = measure, interval = flushInterval
+        let full = absolute(path), measure = measure, interval = flushInterval, home = home
         let options = WalkOptions(excluding: protected, limit: .seconds(30), stop: stop)
         let batch = Batch()
         Task {
@@ -125,14 +125,22 @@ public final class FolderMeasurements {
             }
         }
         Task {
+            var refused: FolderAttribution.Refusal?
             for name in names {
-                let entry = await offload { measure(name, full, owners, options) }
+                // The folder is checked again before each entry: replaced by a link or a
+                // protected folder mid-level, measuring stops there.
+                let (refusal, entry) = await offload { () -> (FolderAttribution.Refusal?, FolderEntry?) in
+                    if let refusal = FolderAttribution.refusal(full, home: home, protected: protected) { return (refusal, nil) }
+                    return (nil, measure(name, full, owners, options))
+                }
+                if let refusal { refused = refusal; break }
                 // A stopped walk is incomplete: leave that entry pending.
                 guard !stop.isStopped else { break }
                 batch.add(name, entry)
             }
             batch.finished = true
             record(batch.take(), in: path, id)
+            if let refused, !stop.isStopped, levels[path]?.id == id { levels[path] = FolderLevel(problem: refused) }
             if !stop.isStopped { measuring = nil }
         }
     }

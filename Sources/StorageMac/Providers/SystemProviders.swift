@@ -5,7 +5,7 @@ import StorageCore
 /// macOS itself: the system, Preboot, Recovery and VM volumes, the Command Line Tools,
 /// and the disk's capacity.
 public struct SystemProvider: Provider {
-    public let area = "Volumes"
+    public let area = Snapshot.volumesArea
 
     public init() {}
 

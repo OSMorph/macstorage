@@ -109,6 +109,9 @@ struct StatusStrips: View {
                 }
                 .padding(8).background(.yellow.opacity(0.15))
             }
+            if model.snapshot?.format == Snapshot.migratedFormat {
+                strip("This scan was saved by version 0.1.0, which misread the sizes of the macOS, Nix and Data volumes, so they show as not measured. Scan again to measure them.", .blue)
+            }
             if model.snapshot != nil, !model.cleaned.isEmpty || !model.cleanupState.partlyCleaned.isEmpty {
                 strip("Sizes are from the scan before the cleanups since. Completed steps have left Cleanup; By owner keeps their scan-time sizes, marked “Cleaned since this scan”. Scan again to re-measure.", .blue)
             }

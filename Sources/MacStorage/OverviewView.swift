@@ -16,8 +16,8 @@ struct OverviewView: View {
                         Tile(title: { TierBadge(tier: .review) }, value: formatBytes(acc.reviewOnDisk), unit: "on disk",
                              note: "Your own data. Nothing estimated: only you can decide what goes.")
                         Tile(title: { Text(s.isPartial ? "Not scanned or attributed yet" : "Not attributed yet") }, value: formatBytes(acc.unattributedOnDisk), unit: "on disk",
-                             note: s.disk.dataVolumeUsed == nil ? "Everything no owner accounts for, including other volumes: this scan didn't measure the Data volume. Scan again to separate them."
-                                : s.isPartial ? partialNote(s)
+                             note: s.isPartial ? partialNote(s)
+                                : s.disk.dataVolumeUsed == nil ? "Everything no owner accounts for, including other volumes: this scan didn't measure the Data volume."
                                 : model.fullDiskAccess || model.demo ? "Mostly outside your home folder (/Applications, /Library, /private), which this scan didn't measure, and local snapshots."
                                 : "Folders macOS hides without Full Disk Access, plus places outside your home folder this scan didn't measure.",
                              link: ("See scan coverage", { model.section = .coverage }))
@@ -36,7 +36,8 @@ struct OverviewView: View {
     private func partialNote(_ s: Snapshot) -> String {
         let areas = s.unfinishedAreas.filter { $0 != "Folder sizes" }
         return "Includes " + (areas.isEmpty ? "folders this stopped scan didn't size" : "what this stopped scan didn't reach (\(areas.joined(separator: ", ")))")
-            + (model.fullDiskAccess || model.demo ? ", and anything outside your home folder." : ", folders macOS hides without Full Disk Access, and anything outside your home folder.")
+            + (model.fullDiskAccess || model.demo ? ", and anything outside your home folder" : ", folders macOS hides without Full Disk Access, and anything outside your home folder")
+            + (s.disk.dataVolumeUsed == nil ? ", and other volumes (the Data volume wasn't measured)." : ".")
     }
 
     private func hero(_ s: Snapshot) -> some View {

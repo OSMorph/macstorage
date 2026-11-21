@@ -130,10 +130,11 @@ struct Inspector: View {
                     Text("\(plural(snapshot.owners.count, "owner")) · \(formatBytes(snapshot.owners.map(\.hostOnDisk).reduce(0, +))) attributed").foregroundStyle(.secondary)
                     Callout("Pick an owner in the map or the list (Return opens it) to see what it's made of, the recommendation, and the exact command or action.")
                     let unattributed = formatBytes(accounting.unattributedOnDisk)
-                    Callout(snapshot.disk.dataVolumeUsed == nil
+                    let otherVolumes = snapshot.disk.dataVolumeUsed == nil ? " It includes other volumes: this scan didn't measure the Data volume." : ""
+                    Callout(snapshot.isPartial
+                            ? "\(unattributed) not scanned or attributed yet: this scan stopped before \(snapshot.unfinishedAreas.joined(separator: ", ")) finished, and it doesn't look outside your home folder.\(otherVolumes)"
+                            : snapshot.disk.dataVolumeUsed == nil
                             ? "\(unattributed) not attributed yet, including other volumes: this scan didn't measure the Data volume."
-                            : snapshot.isPartial
-                            ? "\(unattributed) not scanned or attributed yet: this scan stopped before \(snapshot.unfinishedAreas.joined(separator: ", ")) finished, and it doesn't look outside your home folder."
                             : "\(unattributed) not attributed yet: space on the Data volume no owner accounts for, mostly because this scan didn't look outside your home folder, plus local snapshots.") {
                         Button("See scan coverage") { model.section = .coverage }.buttonStyle(.link)
                     }

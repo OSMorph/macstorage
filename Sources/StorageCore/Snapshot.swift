@@ -14,6 +14,10 @@ public struct Snapshot: Codable, Equatable, Sendable {
 
     /// Version 2 measures each APFS volume's own used space (0.1.0 read the container's).
     public static let currentFormat = 2
+    /// A 0.1.0 scan after `migrated()`: its volume sizes are marked not measured.
+    public static let migratedFormat = 1
+    /// The coverage area for disk capacity and the macOS volumes.
+    public static let volumesArea = "Volumes"
     /// Owners 0.1.0 sized from a whole APFS volume, so with the container's used space.
     public static let legacyVolumeOwners: Set<String> = ["macos", "nix"]
 
@@ -48,16 +52,20 @@ public struct Snapshot: Codable, Equatable, Sendable {
     public func migrated() -> Snapshot {
         guard format == nil else { return self }
         var s = self
-        s.format = Self.currentFormat
+        s.format = Self.migratedFormat
         s.disk.dataVolumeUsed = nil
-        for o in s.owners.indices where Self.legacyVolumeOwners.contains(s.owners[o].id) {
+        for o in s.owners.indices {
             for i in s.owners[o].items.indices where [.macOSVolume, .nixLive].contains(s.owners[o].items[i].kind) {
                 s.owners[o].items[i].onDisk = .notMeasured
             }
         }
-        s.coverage.removeAll { $0.area == "Volumes" }
-        s.coverage.append(CoverageEntry(area: "Volumes", status: .notMeasured,
-                                        detail: "This scan was saved by version 0.1.0, which misread the macOS, Nix and Data volumes' sizes. Scan again to measure them."))
+        let note = "Saved by version 0.1.0, which misread the macOS, Nix and Data volumes' sizes. Scan again to measure them."
+        s.coverage.removeAll { $0.area == Self.volumesArea }
+        s.coverage.append(CoverageEntry(area: Self.volumesArea, status: .notMeasured, detail: note))
+        for c in s.coverage.indices where s.coverage[c].area == "Nix" && s.coverage[c].status == .measured {
+            s.coverage[c].status = .failed
+            s.coverage[c].detail = note
+        }
         s.coverage.sort { $0.area < $1.area }
         return s
     }

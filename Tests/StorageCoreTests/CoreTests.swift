@@ -151,7 +151,8 @@ final class AccountingTests: XCTestCase {
         let legacy = try Self.legacyScan()
         XCTAssertNil(legacy.format)
         let s = legacy.migrated()
-        XCTAssertEqual(s.format, Snapshot.currentFormat)
+        XCTAssertEqual(s.format, Snapshot.migratedFormat)
+        XCTAssertEqual(s.coverage.first { $0.area == "Nix" }?.status, .failed, "Nix's own entry doesn't say Measured")
         XCTAssertEqual(s.owner("macos")?.onDiskMeasure, .notMeasured, "not 2.7 TB")
         XCTAssertEqual(s.owner("nix")?.items.first { $0.kind == .nixLive }?.onDisk, .notMeasured)
         XCTAssertEqual(s.owner("nix")?.onDiskMeasure, .atLeast(Demo.gb(16.7)), "the dead paths Nix sized itself stand")
@@ -449,6 +450,11 @@ final class HistoryTests: XCTestCase {
         let saved = try JSONDecoder().decode(Snapshot.self, from: JSONEncoder().encode(s))
         XCTAssertNil(saved.disk.dataVolumeUsed)
         XCTAssertEqual(saved.migrated(), saved)
+        // The disk bar: one "Not attributed yet" for everything no owner accounts for.
+        let acc = Accounting(saved)
+        XCTAssertNil(acc.diskSegments.first { $0.id == "other" })
+        XCTAssertEqual(acc.diskSegments.first { $0.id == "unattributed" }?.bytes, saved.disk.used - acc.onDiskByKind.values.reduce(0, +))
+        XCTAssertEqual(acc.diskSegments.map(\.bytes).reduce(0, +), saved.disk.total)
     }
 
     func testAnOwnerWithNothingMeasuredIsUnmeasuredInHistory() {

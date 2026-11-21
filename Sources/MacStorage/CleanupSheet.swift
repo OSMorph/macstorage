@@ -182,9 +182,12 @@ struct RunningPhase: View {
 struct OutcomeIcon: View {
     let outcome: StepOutcome?
     var running = false
+    /// A done step that left some approved targets alone reads as partly done.
+    var leftSome = false
 
     var body: some View {
         switch outcome {
+        case .done? where leftSome: Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange).accessibilityLabel("Partly done: some items left alone")
         case .done?: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityLabel("Done")
         case .partial?: Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange).accessibilityLabel("Partly done")
         case .skipped?: Image(systemName: "arrow.uturn.right.circle").foregroundStyle(.orange).accessibilityLabel("Skipped")
@@ -228,7 +231,7 @@ struct ResultsPhase: View {
             List(run.steps, id: \.step.id) { r in
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        OutcomeIcon(outcome: r.outcome)
+                        OutcomeIcon(outcome: r.outcome, leftSome: !r.leftAlone.isEmpty)
                         Text("\(r.step.ownerName) · \(r.step.item.name)")
                         Spacer()
                         Text(outcomeText(r)).monospacedDigit().foregroundStyle(.secondary)

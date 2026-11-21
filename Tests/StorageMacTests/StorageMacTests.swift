@@ -416,7 +416,7 @@ final class CleanupSafetyTests: XCTestCase {
         plan.steps = [failing, later]
         let run = await executor(tools).run(plan, stop: StopSignal())
         XCTAssertEqual(run.steps[0].outcome, .failed(error: "boom"))
-        XCTAssertEqual(run.steps[1].outcome, .notRun(reason: "Not started because an earlier step failed."))
+        XCTAssertEqual(run.steps[1].outcome, .notRun(reason: "Not started because an earlier step failed or only partly succeeded."))
         XCTAssertFalse(tools.calls.contains { $0.hasPrefix("nix-store") })
     }
 

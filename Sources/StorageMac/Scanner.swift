@@ -146,10 +146,14 @@ public struct Scanner: Sendable {
 
     /// A snapshot from what the providers found.
     static func assemble(started: Date, owners: [Owner], coverage: [CoverageEntry], folders: [String: [FolderEntry]]) -> Snapshot {
-        Snapshot(date: started, scanDuration: Date().timeIntervalSince(started), disk: SystemProvider.diskUsage(),
-                 // Keep owners with a size, or one that's unknown or a lower bound (even of zero).
-                 owners: owners.filter { $0.onDisk > 0 || $0.items.contains { !$0.onDisk.isExact } }.sorted { $0.onDisk > $1.onDisk },
-                 coverage: coverage.sorted { $0.area < $1.area }, folders: folders)
+        let disk = SystemProvider.diskUsage()
+        // Said here, from the measurement the snapshot keeps.
+        let data = disk.dataVolumeUsed != nil ? [] : [CoverageEntry(area: "Data volume", status: .failed,
+            detail: "macOS didn't report the Data volume's size, so \"Not attributed yet\" includes other volumes.")]
+        return Snapshot(date: started, scanDuration: Date().timeIntervalSince(started), disk: disk,
+                        // Keep owners with a size, or one that's unknown or a lower bound (even of zero).
+                        owners: owners.filter { $0.onDisk > 0 || $0.items.contains { !$0.onDisk.isExact } }.sorted { $0.onDisk > $1.onDisk },
+                        coverage: (coverage + data).sorted { $0.area < $1.area }, folders: folders)
     }
 }
 

@@ -433,6 +433,24 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(changes.map(\.ownerID), ["go"], "no 'macOS shrank 2.6 TB'")
     }
 
+    func testA010SummaryDecodesWithoutAFormat() throws {
+        let json = #"{"date": 0, "used": 663, "free": 332, "owners": {"macos": 2652, "go": 10}, "names": {}, "events": []}"#
+        let old = try JSONDecoder().decode(ScanSummary.self, from: Data(json.utf8))
+        XCTAssertNil(old.format)
+        XCTAssertNil(old.size("macos"))
+        XCTAssertEqual(old.size("go"), 10)
+        let new = try JSONDecoder().decode(ScanSummary.self, from: JSONEncoder().encode(ScanSummary(Demo.snapshot())))
+        XCTAssertEqual(new.format, Snapshot.currentFormat)
+    }
+
+    func testAnUnmeasuredDataVolumeSurvivesSaving() throws {
+        var s = Demo.snapshot()
+        s.disk.dataVolumeUsed = nil
+        let saved = try JSONDecoder().decode(Snapshot.self, from: JSONEncoder().encode(s))
+        XCTAssertNil(saved.disk.dataVolumeUsed)
+        XCTAssertEqual(saved.migrated(), saved)
+    }
+
     func testAnOwnerWithNothingMeasuredIsUnmeasuredInHistory() {
         var s = Demo.snapshot()
         let i = s.owners.firstIndex { $0.id == "macos" }!

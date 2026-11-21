@@ -55,7 +55,7 @@ public struct SystemProvider: Provider {
         // A volume that's mounted but can't be measured stays listed, as not measured.
         let mounted = Self.volumes.sorted { $0.key < $1.key }.filter { Self.isMountPoint($0.key) }
         let facts = mounted.map { path, name in Fact(.macOSVolume, key: name, name: name, onDisk: Self.volumeUsed(path).map(Measure.bytes) ?? .notMeasured) }
-        let failed = facts.filter { $0.onDisk.bytes == nil }.compactMap(\.name) + (Self.volumeUsed(Self.dataVolume) == nil ? ["Data volume"] : [])
+        let failed = facts.filter { $0.onDisk.bytes == nil }.compactMap(\.name)
         var owners = [Owner(id: "macos", name: "macOS", kind: .system, location: "System, Preboot, VM and Update volumes", isOwnVolume: true, items: facts.map(Rules.item))]
         let clt = "/Library/Developer/CommandLineTools"
         if ctx.exists(clt) {

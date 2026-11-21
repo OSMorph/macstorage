@@ -282,6 +282,21 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(early?.notes, [])
     }
 
+    func testAnUnmeasuredOwnerIsAGapNotAZero() {
+        let day: TimeInterval = 86_400
+        func scan(_ i: Double, _ docker: Int64?) -> ScanSummary {
+            var s = ScanSummary(date: Date(timeIntervalSince1970: i * day), used: 100, free: 900,
+                                owners: docker.map { ["docker": $0] } ?? [:], names: ["docker": "Docker"])
+            if docker == nil { s.unmeasured = ["docker"] }
+            return s
+        }
+        let h = History(scans: [scan(0, 50), scan(1, nil), scan(2, 50)])
+        XCTAssertTrue(h.changes(from: 0, to: 1).isEmpty, "no 'shrank 50 GB' when it just wasn't measured")
+        XCTAssertTrue(h.changes(from: 1, to: 2).isEmpty)
+        XCTAssertTrue(h.changes(from: 0, to: 2).isEmpty, "no change across the gap")
+        XCTAssertEqual(h.scans[1].size("docker"), nil)
+    }
+
     func testComparingAScanWithItselfIsEmpty() {
         XCTAssertTrue(history.changes(from: 4, to: 4).isEmpty)
     }

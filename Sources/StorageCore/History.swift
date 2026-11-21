@@ -19,11 +19,12 @@ public struct History: Codable, Equatable, Sendable {
         guard from != to, scans.indices.contains(from), scans.indices.contains(to) else { return [] }
         let (a, b) = (min(from, to), max(from, to))
         let ids = Set(scans[a].owners.keys).union(scans[b].owners.keys)
-        return ids.map { id in
-            let delta = (scans[b].owners[id] ?? 0) - (scans[a].owners[id] ?? 0)
+        // An owner unmeasured at either end has no comparable change.
+        return ids.compactMap { id in
+            guard let end = scans[b].size(id), let start = scans[a].size(id) else { return nil }
             let notes = scans[(a + 1)...b].flatMap { s in s.events.filter { $0.ownerID == id }.map(\.text) }
-            return OwnerChange(ownerID: id, name: scans[b].names[id] ?? scans[a].names[id] ?? id, delta: delta,
-                               series: scans.map { $0.owners[id] ?? 0 }, notes: notes)
+            return OwnerChange(ownerID: id, name: scans[b].names[id] ?? scans[a].names[id] ?? id, delta: end - start,
+                               series: scans.map { $0.size(id) }, notes: notes)
         }
         .filter { $0.delta != 0 }
         .sorted { abs($0.delta) > abs($1.delta) }
@@ -52,6 +53,15 @@ public struct ScanSummary: Codable, Equatable, Sendable {
     public var names: [String: String]
     /// Things noticed in this scan that explain a change ("2 disk images added").
     public var events: [ScanEvent]
+    /// Owners whose size on the Mac couldn't be measured in this scan (a VM disk not found):
+    /// a gap in their history, not a zero.
+    public var unmeasured: Set<String>? = nil
+
+    /// The owner's size in this scan, or nil when it wasn't measured. An owner that didn't
+    /// exist is 0.
+    public func size(_ ownerID: String) -> Int64? {
+        unmeasured?.contains(ownerID) == true ? nil : owners[ownerID] ?? 0
+    }
 
     public init(date: Date, used: Int64, free: Int64, owners: [String: Int64], names: [String: String], events: [ScanEvent] = []) {
         self.date = date
@@ -64,8 +74,10 @@ public struct ScanSummary: Codable, Equatable, Sendable {
 
     public init(_ snapshot: Snapshot, events: [ScanEvent] = []) {
         self.init(date: snapshot.date, used: snapshot.disk.used, free: snapshot.disk.free,
-                  owners: Dictionary(snapshot.owners.map { ($0.id, $0.hostOnDisk) }, uniquingKeysWith: +),
+                  owners: Dictionary(snapshot.owners.filter { $0.hostSizeUnknown != true }.map { ($0.id, $0.hostOnDisk) }, uniquingKeysWith: +),
                   names: Dictionary(snapshot.owners.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a }), events: events)
+        let unknown = Set(snapshot.owners.filter { $0.hostSizeUnknown == true }.map(\.id))
+        unmeasured = unknown.isEmpty ? nil : unknown
     }
 }
 
@@ -84,7 +96,8 @@ public struct OwnerChange: Equatable, Identifiable, Sendable {
     public var ownerID: String
     public var name: String
     public var delta: Int64
-    public var series: [Int64]
+    /// The owner's size in each scan; nil where it couldn't be measured.
+    public var series: [Int64?]
     public var notes: [String]
 }
 

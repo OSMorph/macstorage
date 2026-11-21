@@ -195,6 +195,18 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertEqual(CleanupExecutor.deleteFromTrash([entry]).deleted.count, 1)
     }
 
+    func testPermanentDeletionReportsWhatTheFolderHoldsNow() async throws {
+        let folder = home.appending(path: "Archive-x")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let result = await executor().perform(step([Target(folder.path, identity: FileSizes.identity(folder.path))]), previewTime: .now)
+        var entry = try XCTUnwrap(result.trashed.first)
+        entry.isEstimate = true   // as if the walk before the move had been incomplete
+        FileManager.default.createFile(atPath: entry.landed + "/added", contents: Data(repeating: 1, count: 40_000))
+        let deleted = try XCTUnwrap(CleanupExecutor.deleteFromTrash([entry]).deleted.first)
+        XCTAssertGreaterThanOrEqual(deleted.bytes, 40_000)
+        XCTAssertFalse(deleted.isEstimate)
+    }
+
     func testTrashDeletionRefusesAnythingOutsideTheTrash() {
         let path = file("keep.tmp")
         let entry = TrashEntry(original: path, landed: path, identity: FileSizes.identity(path), bytes: 1, picked: false)
@@ -522,6 +534,19 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.recoverJournaledRuns().map(\.id), [run.id])
         XCTAssertEqual(store.loadHistory().runs.map(\.id), [run.id])
         XCTAssertTrue(store.recoverJournaledRuns().isEmpty)
+    }
+
+    func testHistoryCatchesUpWithANewerFullRecord() throws {
+        let store = HistoryStore(folder: folder)
+        var run = bigRun()
+        try store.save(run)
+        Thread.sleep(forTimeInterval: 0.05)
+        run.trashDeletions.append(.init(date: .now, deleted: [], refused: ["/gone"]))
+        try store.journal(run)   // the full record moved on; History still has the old copy
+        XCTAssertEqual(store.loadHistory().runs.first?.trashDeletions.count, 0)
+        XCTAssertEqual(store.recoverJournaledRuns().map(\.id), [run.id])
+        XCTAssertEqual(store.loadHistory().runs.first?.trashDeletions.count, 1)
+        XCTAssertTrue(store.recoverJournaledRuns().isEmpty, "nothing left to reconcile")
     }
 
     func testAStaleReceiptIsWrittenAgainFromTheFullRecord() throws {

@@ -225,7 +225,7 @@ struct ResultsPhase: View {
             if !inTrash.isEmpty { trashBox(inTrash) }
             ForEach(run.trashDeletions.indices, id: \.self) { i in
                 let d = run.trashDeletions[i]
-                Callout("Deleted \(plural(d.deleted.count, "item")) (\(formatBytes(d.bytes))) from the Trash."
+                Callout("Deleted \(plural(d.deleted.count, "item")) (\(d.deleted.bytesText)) from the Trash."
                         + (d.refused.isEmpty ? "" : " \(plural(d.refused.count, "item")) had been moved, replaced or restored, so the app left them alone."))
             }
             List(run.steps, id: \.step.id) { r in
@@ -302,10 +302,10 @@ struct ResultsPhase: View {
             let predicted = run.predicted(d)
             return predicted > 0 ? "predicted \(run.predictedText(d)) for the steps that ran" : nil
         }
-        let inTrashBytes = inTrash.map(\.bytes).reduce(0, +)
+        let deleted = run.trashDeletions.flatMap(\.deleted)
         return [
-            (freedText(run, .mac), run.deletedFromTrash > 0 ? "Freed on your Mac, including \(formatBytes(run.deletedFromTrash)) deleted from the Trash" : "Freed on your Mac", detail(.mac)),
-            (formatBytes(inTrashBytes), "Now in the Trash (\(plural(inTrash.count, "item"))), freed when you empty it", detail(.trash)),
+            (freedText(run, .mac), deleted.isEmpty ? "Freed on your Mac" : "Freed on your Mac, including \(deleted.bytesText) deleted from the Trash", detail(.mac)),
+            (inTrash.bytesText, "Now in the Trash (\(plural(inTrash.count, "item"))), freed when you empty it", detail(.trash)),
             (freedText(run, .containerDisk), "Freed inside Docker's disk; the disk file shrinks later", detail(.containerDisk)),
         ]
     }
@@ -315,13 +315,13 @@ struct ResultsPhase: View {
         let picked = entries.filter(\.picked), caches = entries.filter { !$0.picked }
         if confirmingDelete {
             let count = caches.count + (includePicked ? picked.count : 0)
-            let bytes = caches.map(\.bytes).reduce(0, +) + (includePicked ? picked.map(\.bytes).reduce(0, +) : 0)
+            let chosen = caches + (includePicked ? picked : [])
             VStack(alignment: .leading, spacing: 8) {
                 Text("Delete items from the Trash permanently? This can't be undone.").fontWeight(.semibold)
                 if !picked.isEmpty {
                     Toggle(isOn: $includePicked) {
                         VStack(alignment: .leading) {
-                            Text("Also delete my \(plural(picked.count, "picked file")) (\(formatBytes(picked.map(\.bytes).reduce(0, +)))). These are your own files, possibly the only copies:").fontWeight(.medium)
+                            Text("Also delete my \(plural(picked.count, "picked file")) (\(picked.bytesText)). These are your own files, possibly the only copies:").fontWeight(.medium)
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 1) {
                                     ForEach(picked, id: \.landed) { Text("\($0.original) · \(formatBytes($0.bytes))").font(.system(.caption, design: .monospaced)) }
@@ -332,13 +332,13 @@ struct ResultsPhase: View {
                     }.toggleStyle(.checkbox)
                 }
                 if !caches.isEmpty {
-                    DisclosureGroup("\(plural(caches.count, "rebuildable cache item")) (\(formatBytes(caches.map(\.bytes).reduce(0, +))))") {
+                    DisclosureGroup("\(plural(caches.count, "rebuildable cache item")) (\(caches.bytesText))") {
                         TargetList(targets: caches.map { Target($0.original, bytes: $0.bytes) }, unit: "item")
                     }
                 }
                 HStack {
                     Button("Cancel") { confirmingDelete = false }.keyboardShortcut(.cancelAction)
-                    Button(count == 0 ? "Nothing selected" : "Delete \(plural(count, "item")) (\(formatBytes(bytes))) permanently", role: .destructive) {
+                    Button(count == 0 ? "Nothing selected" : "Delete \(plural(count, "item")) (\(chosen.bytesText)) permanently", role: .destructive) {
                         deleting = true
                         Task { await model.deleteFromTrash(run, includePicked: includePicked); deleting = false; confirmingDelete = false }
                     }
@@ -391,7 +391,7 @@ struct ResultsPhase: View {
 /// zero: "Not re-measured" when nothing could be measured, "≥ X" when only part could.
 func freedText(_ run: RunRecord, _ d: Destination) -> String {
     let measured = d == .mac ? run.freedOnMac : run.freed(d)
-    guard run.unmeasuredCount(d) > 0 else { return formatBytes(measured) }
+    guard run.unmeasuredCount(d) > 0 else { return (d == .mac && run.deletedFromTrashIsEstimate ? "≈ " : "") + formatBytes(measured) }
     return measured == 0 ? "Not re-measured" : "≥ " + formatBytes(measured)
 }
 

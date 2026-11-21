@@ -296,7 +296,7 @@ public struct CleanupExecutor: Sendable {
                 try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &landed)
                 let landedPath = (landed as URL?)?.path ?? ""
                 moved.append(TrashEntry(original: target.id, landed: landedPath, identity: FileSizes.identity(landedPath),
-                                        bytes: bytes, picked: step.item.tier == .review))
+                                        bytes: bytes, picked: step.item.tier == .review, isEstimate: !size.isComplete))
             } catch {
                 problems.append("\(target.id): \(error.localizedDescription)")
             }
@@ -322,12 +322,19 @@ public struct CleanupExecutor: Sendable {
         let trashPath = (trashURL ?? URL(fileURLWithPath: NSHomeDirectory() + "/.Trash")).path
         let trash = FileSizes.realPath(trashPath) ?? trashPath
         var deleted: [TrashEntry] = [], refused: [String] = []
-        for entry in entries {
+        for var entry in entries {
             // Same rule as moving: a folder is the same object even if Finder added a .DS_Store.
             guard FileSizes.resolvingAncestors(entry.landed).hasPrefix(trash + "/"),
                   let identity = FileSizes.identity(entry.landed), let expected = entry.identity,
-                  FileSizes.isDirectory(entry.landed) ? identity.isSameObject(as: expected) : identity == expected,
-                  (try? FileManager.default.removeItem(atPath: entry.landed)) != nil else {
+                  FileSizes.isDirectory(entry.landed) ? identity.isSameObject(as: expected) : identity == expected else {
+                refused.append(entry.original)
+                continue
+            }
+            // What it holds now (a folder may have changed in the Trash); the earlier figure
+            // stands, marked as an estimate, if it can't be measured completely.
+            let size = FileSizes.measure(entry.landed)
+            if size.isComplete { entry.bytes = size.privateBytes; entry.isEstimate = false } else { entry.isEstimate = true }
+            guard (try? FileManager.default.removeItem(atPath: entry.landed)) != nil else {
                 refused.append(entry.original)
                 continue
             }

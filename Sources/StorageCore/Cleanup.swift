@@ -126,13 +126,27 @@ public struct TrashEntry: Codable, Equatable, Sendable {
     public var bytes: Int64
     /// True for files the user picked themselves (Review items).
     public var picked: Bool
+    /// True when `bytes` couldn't be measured completely (the scan's figure stands in).
+    public var isEstimate: Bool {
+        get { estimate ?? false }
+        set { estimate = newValue ? true : nil }
+    }
+    private var estimate: Bool?
 
-    public init(original: String, landed: String, identity: FileIdentity?, bytes: Int64, picked: Bool) {
+    public init(original: String, landed: String, identity: FileIdentity?, bytes: Int64, picked: Bool, isEstimate: Bool = false) {
         self.original = original
         self.landed = landed
         self.identity = identity
         self.bytes = bytes
         self.picked = picked
+        self.isEstimate = isEstimate
+    }
+}
+
+extension Array where Element == TrashEntry {
+    /// Their total, with "≈ " when any size is an estimate.
+    public var bytesText: String {
+        (contains(where: \.isEstimate) ? "≈ " : "") + ByteFormat.string(map(\.bytes).reduce(0, +))
     }
 }
 
@@ -182,6 +196,7 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
         }
 
         public var bytes: Int64 { deleted.map(\.bytes).reduce(0, +) }
+        public var isEstimate: Bool { deleted.contains(where: \.isEstimate) }
         public var includedPickedFiles: Bool { deleted.contains(where: \.picked) }
     }
 
@@ -249,6 +264,8 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var deletedFromTrash: Int64 { trashDeletions.map(\.bytes).reduce(0, +) }
+    /// True when part of what was deleted from the Trash couldn't be measured.
+    public var deletedFromTrashIsEstimate: Bool { trashDeletions.contains(where: \.isEstimate) }
     /// Freed on the Mac by commands, plus whatever was later deleted from the Trash.
     public var freedOnMac: Int64 { freed(.mac) + deletedFromTrash }
     /// This run's entries that are still in the Trash.
@@ -308,7 +325,7 @@ public enum Receipt {
             lines.append("")
         }
         for d in run.trashDeletions {
-            lines.append("Later, \(d.date.formatted(date: .omitted, time: .shortened)): deleted \(plural(d.deleted.count, "item")) (\(ByteFormat.string(d.bytes))) from the Trash permanently\(d.includedPickedFiles ? ", including your picked files" : ""):")
+            lines.append("Later, \(d.date.formatted(date: .omitted, time: .shortened)): deleted \(plural(d.deleted.count, "item")) (\(d.deleted.bytesText)) from the Trash permanently\(d.includedPickedFiles ? ", including your picked files" : ""):")
             lines += d.deleted.map { "    \($0.original)" }
             if !d.refused.isEmpty {
                 lines.append("  Refused (moved, replaced or restored since):")
@@ -324,7 +341,8 @@ public enum Receipt {
 public struct CleanupState: Equatable, Sendable {
     /// Items whose step finished completely, with the run that did it.
     public var cleaned: [String: UUID] = [:]
-    /// Items whose step removed only part of what was approved: they stay in Cleanup.
+    /// Items whose step removed only part of what was approved, or left some alone. Like
+    /// cleaned items, they leave the totals and Cleanup until a new scan.
     public var partlyCleaned: [String: UUID] = [:]
     /// Entries of pickable items that are already in the Trash.
     public var removedPicks: [String: Set<String>] = [:]
@@ -354,7 +372,8 @@ public struct CleanupState: Equatable, Sendable {
             cleaned[id] = run
             partlyCleaned[id] = nil
         } else {
-            // Partly done, or done with some targets left alone: what's left stays visible.
+            // Partly done, or done with some left alone: what's left is unknown until a new
+            // scan, so the item leaves the totals and Cleanup, marked partly cleaned.
             partlyCleaned[id] = run
         }
     }

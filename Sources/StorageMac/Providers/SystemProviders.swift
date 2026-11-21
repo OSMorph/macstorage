@@ -113,10 +113,12 @@ public struct LibraryProvider: Provider {
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
         var byApp: [String: [Fact]] = [:]
+        var unlisted: [String] = []
         func collect(_ folder: String, _ kind: ItemKind) async {
             let root = ctx.expand(folder), options = ctx.walk()
             guard !ctx.protectedPaths.contains(root) else { return }
-            for (name, size) in await offload({ FileSizes.children(of: root, options) ?? [] }) where size.allocated >= Self.threshold {
+            guard let children = await offload({ FileSizes.children(of: root, options) }) else { unlisted.append(folder); return }
+            for (name, size) in children where size.allocated >= Self.threshold {
                 let path = root + "/" + name
                 // macOS services' caches: grouped, never cleaned (background services can't be detected as running).
                 let service = kind == .appCache && Self.isSystemService(name)
@@ -152,7 +154,8 @@ public struct LibraryProvider: Provider {
         let logOwner = Owner(id: "logs", name: "Logs", kind: .system, location: "~/Library/Logs", items: [Rules.item(logFact)])
         return ProviderResult(owners: owners + (logBytes > 0 || listed == nil ? [logOwner] : []),
                               coverage: [CoverageEntry(area: area, status: .measured, detail: "Caches, app data\(ctx.fullDiskAccess ? ", containers" : "") and logs in ~/Library.")]
-                                  + (listed == nil ? [CoverageEntry(area: "Logs", status: .failed, detail: "~/Library/Logs couldn't be listed, so its size is a lower bound.")] : []))
+                                  + (listed == nil ? [CoverageEntry(area: "Logs", status: .failed, detail: "~/Library/Logs couldn't be listed, so its size is a lower bound.")] : [])
+                                  + unlisted.map { CoverageEntry(area: $0, status: .failed, detail: "Couldn't be listed, so the apps in it weren't measured.") })
     }
 
     static let systemServicesKey = "macOS services"

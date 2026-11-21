@@ -104,17 +104,24 @@ public struct HistoryStore: Sendable {
         try write(record, to: runURL(run.id))
     }
 
-    /// Adds runs that were journaled but never finished (the app quit or crashed mid-run)
-    /// to the history, so they appear in History with their interrupted step.
+    /// Brings History up to date with the full records: runs that were journaled but never
+    /// finished (the app quit or crashed mid-run), and runs whose full record changed after
+    /// their compact copy was written (a later save stopped halfway). Returns those runs.
     @discardableResult
     public func recoverJournaledRuns() -> [RunRecord] {
-        let folder = folder.appending(path: "Runs")
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
-        let known = Set(loadHistory().runs.map(\.id))
-        let orphans = files.compactMap { UUID(uuidString: ($0 as NSString).deletingPathExtension) }
-            .filter { !known.contains($0) }.compactMap(fullRun)
-        for run in orphans { try? save(run) }
-        return orphans
+        let runs = folder.appending(path: "Runs")
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: runs.path)) ?? []
+        let history = loadHistory()
+        let compact = Dictionary(history.runs.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let historyDate = (try? FileManager.default.attributesOfItem(atPath: historyURL.path))?[.modificationDate] as? Date ?? .distantPast
+        let stale = files.compactMap { name -> RunRecord? in
+            guard let id = UUID(uuidString: (name as NSString).deletingPathExtension) else { return nil }
+            let modified = (try? FileManager.default.attributesOfItem(atPath: runs.appending(path: name).path))?[.modificationDate] as? Date ?? .distantPast
+            guard compact[id] == nil || modified > historyDate, let full = fullRun(id) else { return nil }
+            return compact[id] == Self.compacted(full) ? nil : full
+        }
+        for run in stale { try? save(run) }
+        return stale
     }
 
     /// The run in full, or nil if only the compact copy survives.

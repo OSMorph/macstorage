@@ -60,7 +60,9 @@ public struct LanguageCachesProvider: Provider {
             return (nil, ctx.tools.isInstalled(tool) ? ctx.unavailable(tool, area: "\(tool) cache", what: tool) : nil)
         }
         guard let answered = answer.split(separator: "\n").first.map({ String($0).trimmingCharacters(in: .whitespaces) }),
-              answered.hasPrefix("/") else { return (nil, nil) }
+              answered.hasPrefix("/") else {
+            return (nil, CoverageEntry(area: "\(tool) cache", status: .failed, detail: "\(tool) didn't report a cache folder, so its cache wasn't measured."))
+        }
         let reported = answered + (Self.clearedSubfolder[kind].map { "/" + $0 } ?? "")
         guard let identity = FileSizes.directoryIdentity(reported), !ctx.isProtected(reported) else { return (nil, nil) }
         // Listed through the real path, so a symlinked cache folder shows what's really in it.

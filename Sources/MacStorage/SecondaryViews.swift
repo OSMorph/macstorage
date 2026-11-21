@@ -146,11 +146,12 @@ struct HistoryView: View {
                 ForEach(owners, id: \.self) { id in Text(scans.last?.names[id] ?? id).tag(String?.some(id)) }
             }.labelsHidden().fixedSize()
         }
-        Chart(Array(scans.enumerated()), id: \.offset) { i, s in
-            LineMark(x: .value("Scan", s.date), y: .value("GB", Double(ownerSeries.map { s.owners[$0] ?? 0 } ?? s.used) / 1e9))
+        // Scans where the owner couldn't be measured are left out of its line, not drawn as zero.
+        Chart(Array(scans.enumerated()).filter { point($0.element) != nil }, id: \.offset) { i, s in
+            LineMark(x: .value("Scan", s.date), y: .value("GB", Double(point(s) ?? 0) / 1e9))
                 .interpolationMethod(.monotone)
             if i == from || i == to {
-                PointMark(x: .value("Scan", s.date), y: .value("GB", Double(ownerSeries.map { s.owners[$0] ?? 0 } ?? s.used) / 1e9))
+                PointMark(x: .value("Scan", s.date), y: .value("GB", Double(point(s) ?? 0) / 1e9))
             }
         }
         .chartYAxisLabel("GB used per scan")
@@ -169,7 +170,7 @@ struct HistoryView: View {
                     .foregroundStyle(c.delta > 0 ? Color.errorText : Color.successText).monospacedDigit()
             }.width(150)
             TableColumn("Last scans") { (c: OwnerChange) in
-                Chart(Array(c.series.enumerated()), id: \.offset) { LineMark(x: .value("i", $0.offset), y: .value("b", Double($0.element))) }
+                Chart(c.series.enumerated().compactMap { i, v in v.map { (i, $0) } }, id: \.0) { LineMark(x: .value("i", $0.0), y: .value("b", Double($0.1))) }
                     .chartXAxis(.hidden).chartYAxis(.hidden).frame(width: 90, height: 20).accessibilityHidden(true)
             }.width(100)
             TableColumn("Why") { (c: OwnerChange) in Text(c.notes.joined(separator: "; ")).foregroundStyle(.secondary) }
@@ -178,6 +179,12 @@ struct HistoryView: View {
     }
 
     private func label(_ s: ScanSummary) -> String { s.date.formatted(date: .abbreviated, time: .omitted) }
+
+    /// The charted value of a scan: the whole disk, or the chosen owner (nil if unmeasured).
+    private func point(_ s: ScanSummary) -> Int64? {
+        guard let id = ownerSeries else { return s.used }
+        return s.size(id)
+    }
 }
 
 /// Every cleanup run, with its receipt. Shown in every History state.
@@ -194,7 +201,7 @@ struct CleanupsLog: View {
                         Text(run.started.formatted(date: .abbreviated, time: .shortened))
                         Text(run.progressText).foregroundStyle(.secondary)
                         Spacer()
-                        Text("\(freedText(run, .mac)) freed · \(formatBytes(run.stillInTrash.map(\.bytes).reduce(0, +))) in the Trash · \(freedText(run, .containerDisk)) in Docker's disk")
+                        Text("\(freedText(run, .mac)) freed · \(run.stillInTrash.bytesText) in the Trash · \(freedText(run, .containerDisk)) in Docker's disk")
                             .monospacedDigit().foregroundStyle(.secondary)
                         Button(open.contains(run.id) ? "Hide receipt" : "View receipt") { toggle(run.id) }.buttonStyle(.link)
                     }

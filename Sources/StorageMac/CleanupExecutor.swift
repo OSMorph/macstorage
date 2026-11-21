@@ -114,6 +114,7 @@ public struct CleanupExecutor: Sendable {
         if case .podmanConnection(let uri, let machine)? = step.item.scopeGuard {
             guard let (_, selector) = Self.engine(step.item),
                   await PodmanProvider.connectionURI(selector[1], machine: machine, rootful: selector[1] != machine, tools: tools) == uri,
+                  // Only that it answers: what it says isn't used.
                   let out = try? await tools.run("podman", selector + ["info", "--format", "{{.Host.Hostname}}"], timeout: .seconds(20)), out.succeeded else {
                 return "The Podman connection no longer points at the machine you reviewed, or the machine isn't running."
             }

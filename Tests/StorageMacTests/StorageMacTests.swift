@@ -488,18 +488,18 @@ final class CleanupSafetyTests: XCTestCase {
     }
 
     /// A running machine "dev" with one disk file, answering through `answers`.
-    func podmanMachine(_ answers: [(String) -> ToolOutput?], listAllProviders: Bool = true) async throws -> (ProviderResult, FakeTools) {
+    func podmanMachine(_ answers: [(String) -> ToolOutput?], listAllProviders: Bool = true, connectionsFirst: Bool = false) async throws -> (ProviderResult, FakeTools) {
         let home = FileManager.default.temporaryDirectory.appending(path: "podman-home-\(UUID().uuidString)")
         let folder = home.appending(path: ".local/share/containers/podman/machine/libkrun")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: home) }
         FileManager.default.createFile(atPath: folder.appending(path: "dev-arm64.raw").path, contents: Data(repeating: 1, count: 1 << 20))
         let machines = #"[{"Name":"dev","Running":true,"VMType":"libkrun"}]"#
-        let tools = FakeTools([
+        let tools = FakeTools((connectionsFirst ? answers : []) + [
             { $0.contains("machine list --all-providers") ? (listAllProviders ? ToolOutput(status: 0, stdout: machines) : ToolOutput(status: 125, stdout: "", stderr: "unknown flag")) : nil },
             { $0.contains("machine list --format") ? ToolOutput(status: 0, stdout: machines) : nil },
             { $0.contains("connection list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","URI":"ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock","IsMachine":true},{"Name":"dev-root","URI":"ssh://root@127.0.0.1:50000/run/podman/podman.sock","IsMachine":true}]"#) : nil },
-        ] + answers)
+        ] + (connectionsFirst ? [] : answers))
         return (await PodmanProvider().scan(ScanContext(tools: tools, home: home.path, fullDiskAccess: true)), tools)
     }
 
@@ -526,6 +526,25 @@ final class CleanupSafetyTests: XCTestCase {
         let coverage = try XCTUnwrap(result.coverage.first)
         XCTAssertEqual(coverage.status, .failed)
         XCTAssertTrue(coverage.detail.contains("didn't answer"), coverage.detail)
+    }
+
+    func testARunningMachineWithoutALocalConnectionShowsOnlyItsDisk() async throws {
+        let (result, tools) = try await podmanMachine([
+            { $0.contains("connection list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","URI":"ssh://core@build.example.com:22/run/podman/podman.sock"}]"#) : nil },
+        ], connectionsFirst: true)
+        XCTAssertEqual(result.owners.first?.items.map(\.kind), [.podmanVMDisk])
+        XCTAssertEqual(result.coverage.first?.detail, "Running, but Podman has no connection to it on this Mac. Only its VM disk file was measured.")
+        XCTAssertFalse(tools.calls.contains { $0.contains("--connection") }, "a remote host is never asked")
+    }
+
+    func testAStoreThatDidntAnswerIsntCountedAsOverhead() async throws {
+        let (result, _) = try await podmanMachine([
+            { $0.hasPrefix("podman --connection dev system df") ? ToolOutput(status: 125, stdout: "", stderr: "timeout") : nil },
+            { $0.hasPrefix("podman --connection dev-root volume") ? ToolOutput(status: 0, stdout: "rootdata\n") : nil },
+        ])
+        let kinds = result.owners.first?.items.map(\.kind) ?? []
+        XCTAssertTrue(kinds.contains(.podmanUnusedVolumes), "the rootful store answered")
+        XCTAssertFalse(kinds.contains(.dockerDiskSlack), "the rootless store's size is unknown, so nothing is called overhead")
     }
 
     func testStoppedContainersLeaveOutRunningPausedAndPodInfra() async throws {

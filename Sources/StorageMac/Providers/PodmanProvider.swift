@@ -57,20 +57,21 @@ public struct PodmanProvider: Provider {
             // The rootless connection is named after the machine; the rootful one adds
             // "-root". Only connections to a machine on this Mac are asked: one with the
             // same name to another host, or a rootful one aliasing the rootless socket, isn't.
-            var facts: [Fact] = [], contents: Int64 = 0, problems: [String] = [], asked = Set<String>()
+            var facts: [Fact] = [], contents: Int64 = 0, problems: [String] = [], asked = Set<String>(), allSized = true
             for (connection, rootful) in [(name, false), (name + "-root", true)] {
                 guard let uri = connections[connection].flatMap({ Self.machineURI($0, of: machine, rootful: rootful) }),
                       asked.insert(Self.destination(uri)).inserted else { continue }
                 let found = await engine(ctx, connection: connection, uri: uri, machine: name, rootful: rootful)
                 problems += found.problems
-                contents += found.contents
+                contents += found.contents ?? 0
+                allSized = allSized && found.contents != nil
                 // The rootful store is usually empty; it's only shown when it holds something.
-                if !rootful || found.contents > 0 || found.facts.contains(where: { !$0.targets.isEmpty }) { facts += found.facts }
+                if !rootful || (found.contents ?? 0) > 0 || found.facts.contains(where: { !$0.targets.isEmpty }) { facts += found.facts }
             }
             guard !facts.isEmpty else {
                 let why = asked.isEmpty ? "Podman has no connection to it on this Mac" : "Podman didn't answer through its connection"
                 diskOnly(why + ", so the app couldn't look inside.",
-                         CoverageEntry(area: title, status: .failed, detail: "Running, but \(why.prefix(1).lowercased() + why.dropFirst()) (\(problems.isEmpty ? "nothing to ask" : problems.joined(separator: "; "))). Only its VM disk file was measured."))
+                         CoverageEntry(area: title, status: .failed, detail: "Running, but \(why). Only its VM disk file was measured."))
                 continue
             }
             // Each machine's items point at its own disk file: machines share their folder.
@@ -79,7 +80,8 @@ public struct PodmanProvider: Provider {
             if let disk, let onMac {
                 let logical = ((try? FileManager.default.attributesOfItem(atPath: disk))?[.size] as? NSNumber)?.int64Value ?? 0
                 note = "One VM disk file, \((disk as NSString).lastPathComponent): \(ByteFormat.string(logical)) logical, \(ByteFormat.string(onMac)) on disk. Items are sized inside it."
-                if onMac > contents { facts.append(Fact(.dockerDiskSlack, onDisk: .bytes(onMac - contents), path: disk)) }
+                // Only when every store's size is known: otherwise a store would pass as overhead.
+                if allSized, onMac > contents { facts.append(Fact(.dockerDiskSlack, onDisk: .bytes(onMac - contents), path: disk)) }
             }
             result.owners.append(Owner(id: id, name: title, kind: .developerTools, location: location, note: note,
                                        hostBytes: onMac, hostSizeUnknown: disk == nil, items: facts.map(Rules.item)))
@@ -90,11 +92,12 @@ public struct PodmanProvider: Provider {
         return result
     }
 
-    /// What one connection holds: its items, their total size, and what couldn't be listed.
-    private func engine(_ ctx: ScanContext, connection: String, uri: String, machine: String, rootful: Bool) async -> (facts: [Fact], contents: Int64, problems: [String]) {
+    /// What one connection holds: its items, their total size (nil when Podman didn't say),
+    /// and what couldn't be listed.
+    private func engine(_ ctx: ScanContext, connection: String, uri: String, machine: String, rootful: Bool) async -> (facts: [Fact], contents: Int64?, problems: [String]) {
         let c = ["--connection", connection], label = rootful ? " (rootful)" : ""
         guard let df = await ctx.output("podman", c + ["system", "df", "--format", "{{json .}}"], timeout: .seconds(120)) else {
-            return ([], 0, ["anything through the \(connection) connection (podman system df)"])
+            return ([], nil, ["anything through the \(connection) connection (podman system df)"])
         }
         let usage = Dictionary(Parse.dockerSystemDF(df).map { ($0.type, $0) }, uniquingKeysWith: { a, _ in a })
         let size = { (type: String) in usage[type].map { Measure.bytes($0.size) } ?? .bytes(0) }
@@ -115,9 +118,10 @@ public struct PodmanProvider: Provider {
             let rows = listing.split(whereSeparator: \.isNewline).map { $0.split(separator: "\t").map(String.init) }.filter { $0.count >= 2 }
             // Stopped ones only: not running or paused, and not a pod's infra container
             // (`podman rm` refuses those; the pod owns them).
-            let stopped = rows.filter { ["exited", "created", "stopped", "configured"].contains($0[1]) && $0.dropFirst(2).first != "true" }.map { Target($0[0]) }
+            let containers = rows.filter { $0.dropFirst(2).first != "true" }
+            let stopped = containers.filter { ["exited", "created", "stopped", "configured"].contains($0[1]) }.map { Target($0[0]) }
             facts.append(Fact(.podmanStoppedContainers, key: connection, name: "Stopped containers" + label, onDisk: size("Containers"),
-                              targets: stopped, root: connection, counts: ["stopped": stopped.count, "total": rows.count]))
+                              targets: stopped, root: connection, counts: ["stopped": stopped.count, "total": containers.count]))
         } else { problems.append("containers through \(connection) (podman ps)") }
         if let listing = await ctx.output("podman", c + ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}"]) {
             let volumes = listing.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { Target($0) }
@@ -215,8 +219,8 @@ public struct PodmanProvider: Provider {
             return ((try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? [])
                 .filter { isDisk($0, of: machine, others: others) }.map { folder + "/" + $0 }
         }
-        .filter { FileManager.default.fileExists(atPath: $0) }
-        .max { FileSizes.measure($0).allocated < FileSizes.measure($1).allocated }
+        .map { ($0, FileSizes.measure($0).allocated) }
+        .max { $0.1 < $1.1 }?.0
     }
 
     /// True for a disk image file named after `machine`, and not after another machine

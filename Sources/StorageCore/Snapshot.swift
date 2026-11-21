@@ -64,7 +64,7 @@ public struct Snapshot: Codable, Equatable, Sendable {
         s.coverage.append(CoverageEntry(area: Self.volumesArea, status: .notMeasured, detail: note))
         for c in s.coverage.indices where s.coverage[c].area == "Nix" && s.coverage[c].status == .measured {
             s.coverage[c].status = .failed
-            s.coverage[c].detail = note
+            s.coverage[c].detail = "Saved by version 0.1.0, which misread the /nix volume's size; the dead paths Nix sized itself stand. Scan again to measure the rest."
         }
         s.coverage.sort { $0.area < $1.area }
         return s

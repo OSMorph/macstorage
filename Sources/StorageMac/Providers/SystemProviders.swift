@@ -15,7 +15,7 @@ public struct SystemProvider: Provider {
         let total = Int64(v?.volumeTotalCapacity ?? 0), free = Int64(v?.volumeAvailableCapacity ?? 0)
         let important = v?.volumeAvailableCapacityForImportantUsage ?? free
         return DiskUsage(total: total, free: free, purgeable: max(0, important - free),
-                         dataVolumeUsed: volumeUsed(dataVolume).map { min($0, total - free) })
+                         dataVolumeUsed: total > 0 ? volumeUsed(dataVolume).map { min($0, total - free) } : nil)
     }
 
     /// True when a volume is mounted at `path` (not just a folder on the volume above it).
@@ -30,7 +30,11 @@ public struct SystemProvider: Provider {
     /// (`statfs` reports the whole container's used space for every APFS volume). Nil when
     /// no volume is mounted there or it doesn't say.
     static func volumeUsed(_ path: String) -> Int64? {
-        guard isMountPoint(path) else { return nil }
+        isMountPoint(path) ? spaceUsed(path) : nil
+    }
+
+    /// The space used by the volume `path` is on, as its root reports it.
+    static func spaceUsed(_ path: String) -> Int64? {
         var request = attrlist()
         request.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
         request.commonattr = attrgroup_t(ATTR_CMN_RETURNED_ATTRS)
@@ -54,7 +58,7 @@ public struct SystemProvider: Provider {
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
         // A volume that's mounted but can't be measured stays listed, as not measured.
         let mounted = Self.volumes.sorted { $0.key < $1.key }.filter { Self.isMountPoint($0.key) }
-        let facts = mounted.map { path, name in Fact(.macOSVolume, key: name, name: name, onDisk: Self.volumeUsed(path).map(Measure.bytes) ?? .notMeasured) }
+        let facts = mounted.map { path, name in Fact(.macOSVolume, key: name, name: name, onDisk: Self.spaceUsed(path).map(Measure.bytes) ?? .notMeasured) }
         let failed = facts.filter { $0.onDisk.bytes == nil }.compactMap(\.name)
         var owners = [Owner(id: "macos", name: "macOS", kind: .system, location: "System, Preboot, VM and Update volumes", isOwnVolume: true, items: facts.map(Rules.item))]
         let clt = "/Library/Developer/CommandLineTools"

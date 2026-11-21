@@ -30,7 +30,7 @@ public struct NixProvider: Provider {
         // Normally its own APFS volume; installed in a folder on the Data volume, its dead
         // paths are on the Data volume and the rest isn't measured.
         let ownVolume = SystemProvider.isMountPoint("/nix")
-        let volume = ownVolume ? SystemProvider.volumeUsed("/nix") : nil
+        let volume = ownVolume ? SystemProvider.spaceUsed("/nix") : nil
         let facts = [
             Fact(.nixDeadPaths, onDisk: sized ? .bytes(deadBytes) : .atLeast(deadBytes), targets: paths.map { Target($0) }, path: "/nix/store", counts: ["paths": paths.count]),
             Fact(.nixOldGenerations, onDisk: .notMeasured, reclaimable: .notMeasured, counts: ["generations": max(0, generations - 1)]),

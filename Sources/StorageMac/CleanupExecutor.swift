@@ -111,8 +111,9 @@ public struct CleanupExecutor: Sendable {
                 return "The Docker context no longer reaches the engine you reviewed, or the engine isn't running."
             }
         }
-        if case .podmanConnection(let uri)? = step.item.scopeGuard {
-            guard let (_, selector) = Self.engine(step.item), await PodmanProvider.connectionURI(selector[1], tools: tools) == uri,
+        if case .podmanConnection(let uri, let machine)? = step.item.scopeGuard {
+            guard let (_, selector) = Self.engine(step.item),
+                  await PodmanProvider.connectionURI(selector[1], machine: machine, rootful: selector[1] != machine, tools: tools) == uri,
                   let out = try? await tools.run("podman", selector + ["info", "--format", "{{.Host.Hostname}}"], timeout: .seconds(20)), out.succeeded else {
                 return "The Podman connection no longer points at the machine you reviewed, or the machine isn't running."
             }

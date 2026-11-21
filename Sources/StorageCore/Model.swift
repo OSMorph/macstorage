@@ -180,8 +180,8 @@ public enum ScopeGuard: Codable, Equatable, Hashable, Sendable {
     case folder(FileIdentity)
     /// The Docker context must still reach this engine.
     case dockerEngine(id: String)
-    /// The Podman connection must still point at this address and answer.
-    case podmanConnection(uri: String)
+    /// The Podman connection must still lead to this machine at this address, and answer.
+    case podmanConnection(uri: String, machine: String)
 }
 
 /// Identifies one filesystem object: the same path holding a different or modified object

@@ -321,7 +321,8 @@ final class CleanupSafetyTests: XCTestCase {
     // MARK: Docker binding
 
     func dockerImagesStep(_ targets: [Target]) -> CleanupStep {
-        var s = step(targets, action: .runOnTargets(Command("docker", ["--context", "c", "image", "rm"]), .containerDisk), kind: .dockerUnusedImages)
+        // The action as the rules build it.
+        var s = step(targets, action: Rules.item(Fact(.dockerUnusedImages, onDisk: .bytes(1), targets: targets, root: "c")).action, kind: .dockerUnusedImages)
         s.item.scopeGuard = .dockerEngine(id: "ENGINE1")
         return s
     }
@@ -351,7 +352,7 @@ final class CleanupSafetyTests: XCTestCase {
         let tools = dockerTools(engine: "ENGINE1", images: "sha256:a\nsha256:b\n")
         let result = await executor(tools).perform(dockerImagesStep([Target("app:1", fingerprint: "sha256:a"), Target("app:2", fingerprint: "sha256:b")]), previewTime: .now)
         XCTAssertTrue(result.outcome.isDone)
-        XCTAssertTrue(tools.calls.contains("docker --context c image rm app:1 app:2"))
+        XCTAssertTrue(tools.calls.contains("docker --context c image rm --no-prune app:1 app:2"), "\(tools.calls)")
     }
 
     func testImageRefsCarryTheirImageID() {
@@ -364,14 +365,15 @@ final class CleanupSafetyTests: XCTestCase {
     // MARK: Podman
 
     func podmanImagesStep(_ targets: [Target]) -> CleanupStep {
-        var s = step(targets, action: .runOnTargets(Command("podman", ["--connection", "dev", "image", "rm"]), .containerDisk), kind: .podmanUnusedImages)
-        s.item.scopeGuard = .podmanConnection(uri: "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock")
+        var s = step(targets, action: Rules.item(Fact(.podmanUnusedImages, onDisk: .bytes(1), targets: targets, root: "dev")).action, kind: .podmanUnusedImages)
+        s.item.scopeGuard = .podmanConnection(uri: "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock", machine: "dev")
         return s
     }
 
     func podmanTools(uri: String, images: String) -> FakeTools {
         FakeTools([
             { $0.contains("connection list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","URI":"\#(uri)","IsMachine":true}]"#) : nil },
+            { $0.contains("machine list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","Running":true,"VMType":"libkrun","Port":50000,"RemoteUsername":"core"}]"#) : nil },
             { $0.contains(" info ") ? ToolOutput(status: 0, stdout: "localhost\n") : nil },
             { $0.contains("image inspect") ? ToolOutput(status: 0, stdout: images) : nil },
         ])
@@ -381,7 +383,7 @@ final class CleanupSafetyTests: XCTestCase {
         let tools = podmanTools(uri: "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock", images: "aaa\n")
         let result = await executor(tools).perform(podmanImagesStep([Target("localhost/app:1", fingerprint: "aaa")]), previewTime: .now)
         XCTAssertTrue(result.outcome.isDone, "\(result.outcome)")
-        XCTAssertTrue(tools.calls.contains("podman --connection dev image rm localhost/app:1"))
+        XCTAssertTrue(tools.calls.contains("podman --connection dev image rm --no-prune localhost/app:1"), "\(tools.calls)")
     }
 
     func testAPodmanConnectionPointingElsewhereIsRefused() async {
@@ -430,7 +432,7 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertEqual(images.targets.map(\.id), ["localhost/app:1", "localhost/app:latest", "bbb"])
         XCTAssertEqual(images.targets.map(\.fingerprint), ["aaa", "aaa", "bbb"])
         XCTAssertEqual(images.reclaimable, .bytes(2000), "capped at what Podman says is reclaimable")
-        XCTAssertEqual(images.scopeGuard, .podmanConnection(uri: "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock"))
+        XCTAssertEqual(images.scopeGuard, .podmanConnection(uri: "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock", machine: "dev"))
         XCTAssertEqual(running.items.first { $0.kind == .podmanStoppedContainers }?.targets.map(\.id), ["old-job"])
         XCTAssertEqual(running.items.first { $0.kind == .podmanUnusedVolumes }?.targets.map(\.id), ["scratch"])
         XCTAssertFalse(running.items.contains { $0.name.contains("rootful") })
@@ -438,6 +440,32 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertEqual(stopped.items.map(\.kind), [.podmanVMDisk])
         XCTAssertFalse(tools.calls.contains { $0.contains("dev-2 ") && !$0.contains("connection list") }, "a stopped machine is never asked")
         XCTAssertFalse(tools.calls.contains { $0.contains("machine start") })
+    }
+
+    func testAConnectionMustLeadToItsOwnMachine() {
+        let machine = ["Name": "dev", "Port": "50000", "RemoteUsername": "core"]
+        let rootless = ["URI": "ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock", "IsMachine": "true"]
+        XCTAssertNotNil(PodmanProvider.machineURI(rootless, of: machine, rootful: false))
+        XCTAssertNil(PodmanProvider.machineURI(["URI": "ssh://core@127.0.0.1:50999/run/user/501/podman/podman.sock"], of: machine, rootful: false), "another local VM")
+        XCTAssertNil(PodmanProvider.machineURI(rootless, of: machine, rootful: true), "the rootful connection logs in as root")
+        XCTAssertNotNil(PodmanProvider.machineURI(["URI": "ssh://root@localhost:50000/run/podman/podman.sock"], of: machine, rootful: true))
+        XCTAssertEqual(PodmanProvider.destination("ssh://core@localhost:50000/run/x.sock"), PodmanProvider.destination("ssh://core@127.0.0.1:50000/run/x.sock"))
+    }
+
+    func testOlderPodmanShowsOtherProvidersDisksAsFiles() async throws {
+        let home = FileManager.default.temporaryDirectory.appending(path: "podman-home-\(UUID().uuidString)")
+        let machine = home.appending(path: ".local/share/containers/podman/machine")
+        for type in ["applehv", "qemu"] { try FileManager.default.createDirectory(at: machine.appending(path: type), withIntermediateDirectories: true) }
+        defer { try? FileManager.default.removeItem(at: home) }
+        FileManager.default.createFile(atPath: machine.appending(path: "applehv/dev-arm64.raw").path, contents: Data(repeating: 1, count: 1 << 20))
+        FileManager.default.createFile(atPath: machine.appending(path: "qemu/old_fedora-coreos-39.qcow2").path, contents: Data(repeating: 1, count: 1 << 20))
+        let tools = FakeTools([
+            { $0.contains("--all-providers") ? ToolOutput(status: 125, stdout: "", stderr: "unknown flag") : nil },
+            { $0.contains("machine list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","Running":false,"VMType":"applehv"}]"#) : nil },
+        ])
+        let result = await PodmanProvider().scan(ScanContext(tools: tools, home: home.path, fullDiskAccess: true))
+        XCTAssertEqual(Set(result.owners.map(\.name)), ["Podman (dev)", "Podman machine disk (qemu)"])
+        XCTAssertTrue(result.coverage.contains { $0.area == "Podman (other providers)" })
     }
 
     func testOnlyConnectionsToAMachineOnThisMacAreAsked() {
@@ -528,8 +556,9 @@ final class CleanupSafetyTests: XCTestCase {
             { $0.contains(" info ") ? ToolOutput(status: 0, stdout: "ID1\tFedora CoreOS 41\n") : nil },
             { $0.contains(" version ") ? ToolOutput(status: 1, stdout: "", stderr: "boom") : nil },
         ])
-        let skipped = await DockerProvider().scan(ScanContext(tools: podmanLike, home: NSTemporaryDirectory(), fullDiskAccess: true))
-        XCTAssertTrue(skipped.owners.isEmpty, "a Podman machine isn't counted twice")
+        let fedora = await DockerProvider().scan(ScanContext(tools: podmanLike, home: NSTemporaryDirectory(), fullDiskAccess: true))
+        XCTAssertEqual(fedora.owners.count, 1, "only a positive answer hands an engine to Podman")
+        XCTAssertTrue(fedora.coverage.contains { $0.detail.contains("overlap") }, "the possible overlap is said")
     }
 
     func testADockerContextThatReachesPodmanIsLeftToPodman() async {

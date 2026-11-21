@@ -14,18 +14,20 @@ public struct PodmanProvider: Provider {
         guard ctx.tools.isInstalled("podman") else {
             return ProviderResult(coverage: [CoverageEntry(area: area, status: .skipped, detail: "Podman isn't installed.")])
         }
-        // Podman 5.3+ lists every provider's machines with --all-providers; older versions
-        // know one provider and don't accept the flag.
-        let allProviders = await ctx.output("podman", ["machine", "list", "--all-providers", "--format", "json"])
-        guard let listing = await allProviders.asyncFallback({ await ctx.output("podman", ["machine", "list", "--format", "json"]) }),
-              let machines = Parse.jsonArray(listing) else {
+        guard let (machines, allProviders) = await Self.machines(ctx.tools) else {
             return ProviderResult(coverage: [ctx.unavailable("podman", area: area, what: "Podman")])
         }
+        var result = ProviderResult()
+        if !allProviders {
+            // Older Podman lists one provider's machines: other providers' disks are shown
+            // as files, never asked about.
+            result = Self.unlistedDisks(listed: machines.compactMap { $0["Name"] }, ctx)
+        }
         guard !machines.isEmpty else {
-            return ProviderResult(coverage: [CoverageEntry(area: area, status: .skipped, detail: "Podman has no machine on this Mac.")])
+            result.coverage.append(CoverageEntry(area: area, status: .skipped, detail: "Podman has no machine on this Mac."))
+            return result
         }
         let connections = Self.connections(await ctx.output("podman", ["system", "connection", "list", "--format", "json"]) ?? "")
-        var result = ProviderResult()
         // `podman machine list` marks the default machine with "*" in some versions.
         let named = machines.compactMap { m in m["Name"].map { (machine: m, name: $0.hasSuffix("*") ? String($0.dropLast()) : $0) } }
         let names = named.map(\.name)
@@ -57,8 +59,9 @@ public struct PodmanProvider: Provider {
             // same name to another host, or a rootful one aliasing the rootless socket, isn't.
             var facts: [Fact] = [], contents: Int64 = 0, problems: [String] = [], asked = Set<String>()
             for (connection, rootful) in [(name, false), (name + "-root", true)] {
-                guard let uri = connections[connection].flatMap(Self.localMachineURI), asked.insert(uri).inserted else { continue }
-                let found = await engine(ctx, connection: connection, uri: uri, rootful: rootful)
+                guard let uri = connections[connection].flatMap({ Self.machineURI($0, of: machine, rootful: rootful) }),
+                      asked.insert(Self.destination(uri)).inserted else { continue }
+                let found = await engine(ctx, connection: connection, uri: uri, machine: name, rootful: rootful)
                 problems += found.problems
                 contents += found.contents
                 // The rootful store is usually empty; it's only shown when it holds something.
@@ -88,7 +91,7 @@ public struct PodmanProvider: Provider {
     }
 
     /// What one connection holds: its items, their total size, and what couldn't be listed.
-    private func engine(_ ctx: ScanContext, connection: String, uri: String, rootful: Bool) async -> (facts: [Fact], contents: Int64, problems: [String]) {
+    private func engine(_ ctx: ScanContext, connection: String, uri: String, machine: String, rootful: Bool) async -> (facts: [Fact], contents: Int64, problems: [String]) {
         let c = ["--connection", connection], label = rootful ? " (rootful)" : ""
         guard let df = await ctx.output("podman", c + ["system", "df", "--format", "{{json .}}"], timeout: .seconds(120)) else {
             return ([], 0, ["anything through the \(connection) connection (podman system df)"])
@@ -122,7 +125,7 @@ public struct PodmanProvider: Provider {
                               targets: volumes, root: connection, counts: ["unused": volumes.count, "total": usage["Local Volumes"]?.total ?? volumes.count]))
         } else { problems.append("volumes through \(connection) (podman volume ls)") }
         // Every command is checked against this connection right before it runs.
-        for i in facts.indices { facts[i].scopeGuard = .podmanConnection(uri: uri) }
+        for i in facts.indices { facts[i].scopeGuard = .podmanConnection(uri: uri, machine: machine) }
         return (facts, usage.values.map(\.size).reduce(0, +), problems)
     }
 
@@ -141,11 +144,65 @@ public struct PodmanProvider: Provider {
         return local ? uri : nil
     }
 
-    /// The local machine address a connection points at now, or nil if it's gone, points
-    /// elsewhere, or can't be listed.
-    static func connectionURI(_ name: String, tools: any ToolRunning) async -> String? {
-        guard let out = try? await tools.run("podman", ["system", "connection", "list", "--format", "json"], timeout: .seconds(20)), out.succeeded else { return nil }
-        return connections(out.stdout)[name].flatMap(localMachineURI)
+    /// The connection's address when it's this machine's: local (above), and over SSH to
+    /// the machine's own port as its user ("root" for the rootful connection), as
+    /// `podman machine list` reports them.
+    static func machineURI(_ connection: [String: String], of machine: [String: String], rootful: Bool) -> String? {
+        guard let uri = localMachineURI(connection), let url = URL(string: uri) else { return nil }
+        guard url.scheme == "ssh" else { return uri }
+        if let port = machine["Port"].flatMap(Int.init), url.port != port { return nil }
+        if let user = rootful ? "root" : machine["RemoteUsername"], url.user != user { return nil }
+        return uri
+    }
+
+    /// Where an address leads, however the loopback host is spelled: two connections with
+    /// the same destination reach the same store.
+    static func destination(_ uri: String) -> String {
+        guard let url = URL(string: uri) else { return uri }
+        return "\(url.scheme ?? "")://\(url.user ?? "")@\(url.port.map(String.init) ?? "")\(url.path)"
+    }
+
+    /// The machines, and whether they're every provider's: Podman 5.3+ lists them all with
+    /// --all-providers; older versions know one provider and don't accept the flag.
+    static func machines(_ tools: any ToolRunning) async -> (machines: [[String: String]], allProviders: Bool)? {
+        func list(_ args: [String]) async -> [[String: String]]? {
+            guard let out = try? await tools.run("podman", ["machine", "list"] + args + ["--format", "json"], timeout: .seconds(60)), out.succeeded else { return nil }
+            return Parse.jsonArray(out.stdout.isEmpty ? "[]" : out.stdout)
+        }
+        if let all = await list(["--all-providers"]) { return (all, true) }
+        return await list([]).map { ($0, false) }
+    }
+
+    /// The machine address a connection points at now, or nil if it's gone, no longer
+    /// leads to the named machine, or can't be listed.
+    static func connectionURI(_ name: String, machine: String, rootful: Bool, tools: any ToolRunning) async -> String? {
+        guard let out = try? await tools.run("podman", ["system", "connection", "list", "--format", "json"], timeout: .seconds(20)), out.succeeded,
+              let machine = await machines(tools)?.machines.first(where: { $0["Name"].map { $0.hasSuffix("*") ? String($0.dropLast()) : $0 } == machine })
+        else { return nil }
+        return connections(out.stdout)[name].flatMap { machineURI($0, of: machine, rootful: rootful) }
+    }
+
+    /// Disk files of machines `podman machine list` didn't mention (another provider's,
+    /// on Podman before 5.3), as owners with their disk only.
+    static func unlistedDisks(listed: [String], _ ctx: ScanContext) -> ProviderResult {
+        let root = ctx.expand("~/.local/share/containers/podman/machine")
+        var result = ProviderResult()
+        for type in (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? [] {
+            let folder = root + "/" + type
+            for file in (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
+            where ["raw", "img", "qcow2"].contains((file as NSString).pathExtension) && !listed.contains(where: { isDisk(file, of: $0.hasSuffix("*") ? String($0.dropLast()) : $0, others: listed) }) {
+                let path = folder + "/" + file, onMac = FileSizes.measure(path).allocated
+                guard onMac > 0 else { continue }
+                result.owners.append(Owner(id: "podman:\(type):\(file)", name: "Podman machine disk (\(type))", kind: .developerTools, location: ctx.display(folder),
+                                           note: "A \(type) machine's disk. This Podman lists only the current provider's machines, so the app didn't ask about it.",
+                                           hostBytes: onMac, items: [Rules.item(Fact(.podmanVMDisk, onDisk: .bytes(onMac), path: path))]))
+            }
+        }
+        if !result.owners.isEmpty {
+            result.coverage.append(CoverageEntry(area: "Podman (other providers)", status: .notMeasured,
+                                                 detail: "Podman before 5.3 lists one provider's machines; \(plural(result.owners.count, "disk file")) of other providers' machines were measured as files."))
+        }
+        return result
     }
 
     /// The machine's disk file: Podman keeps it in a folder per VM type, named after the
@@ -177,10 +234,5 @@ private extension Optional {
     func asyncMap<T>(_ transform: (Wrapped) async -> T) async -> T? {
         guard let self else { return nil }
         return await transform(self)
-    }
-
-    func asyncFallback(_ other: () async -> Wrapped?) async -> Wrapped? {
-        if let self { return self }
-        return await other()
     }
 }

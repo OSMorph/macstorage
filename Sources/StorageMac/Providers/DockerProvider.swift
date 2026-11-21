@@ -28,12 +28,17 @@ public struct DockerProvider: Provider {
             }
             guard seenEngines.insert(engineID).inserted else { continue }
             // Podman answers Docker's API too (through its Docker socket); its machines are
-            // measured with podman, so they aren't counted twice.
-            // When the version can't be read, a Podman machine's Fedora system gives it away.
+            // measured with podman, so they aren't counted twice. Only a positive answer
+            // counts: when the version can't be read, the engine is measured here and the
+            // possible overlap is said.
             let components = await ctx.output("docker", ["--context", name, "version", "--format", "{{range .Server.Components}}{{.Name}};{{end}}"], timeout: .seconds(10))
-            if components?.localizedCaseInsensitiveContains("podman") ?? (info.last ?? "").localizedCaseInsensitiveContains("fedora") {
+            if components?.localizedCaseInsensitiveContains("podman") == true {
                 result.coverage.append(CoverageEntry(area: "Docker context \(name)", status: .skipped, detail: "Reaches Podman; measured under Podman instead."))
                 continue
+            }
+            if components == nil, (info.last ?? "").localizedCaseInsensitiveContains("fedora") {
+                result.coverage.append(CoverageEntry(area: "Docker context \(name)", status: .notMeasured,
+                                                     detail: "Its engine runs Fedora and didn't say what it is. If it's Podman's Docker socket, its machine is listed under Podman too, and the two overlap."))
             }
             let engineName = Self.engineName(info.last ?? "", endpoint: endpoint)
             let disk = Self.vmDisk(engineName, context: name, ctx)

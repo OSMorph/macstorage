@@ -58,6 +58,37 @@ final class FileSizesTests: XCTestCase {
         XCTAssertNil(FolderAttribution.entry("Empty", in: dir.path, owners: owners, options), "nothing that takes no space")
         XCTAssertNil(FolderAttribution.entry("link", in: dir.path, owners: owners, options), "a symlink isn't followed")
         XCTAssertNil(FolderAttribution.names(in: dir.appending(path: "missing").path))
+
+        // A folder that can't be read is kept, not dropped as empty.
+        let locked = dir.appending(path: "Locked")
+        try fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        fm.createFile(atPath: locked.appending(path: "x.bin").path, contents: Data(repeating: 4, count: 1 << 20))
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path) }
+        let unreadable = try XCTUnwrap(FolderAttribution.entry("Locked", in: dir.path, owners: owners, options))
+        XCTAssertTrue(unreadable.isPartial)
+    }
+
+    func testAFolderIsOnlyOpenedWhenItsRealAndAllowed() throws {
+        let fm = FileManager.default
+        let home = dir.appending(path: "home"), outside = dir.appending(path: "elsewhere/inner")
+        for d in [home.appending(path: "Projects/app"), home.appending(path: "Downloads/zips"), outside] {
+            try fm.createDirectory(at: d, withIntermediateDirectories: true)
+        }
+        fm.createFile(atPath: home.appending(path: "notes.txt").path, contents: Data())
+        try fm.createSymbolicLink(atPath: home.appending(path: "link").path, withDestinationPath: dir.appending(path: "elsewhere").path)
+        let protected: Set<String> = [home.appending(path: "Downloads").path]
+        func refusal(_ sub: String) -> FolderAttribution.Refusal? {
+            FolderAttribution.refusal(home.path + "/" + sub, home: home.path, protected: protected)
+        }
+        XCTAssertNil(refusal("Projects"))
+        XCTAssertNil(refusal("Projects/app"))
+        XCTAssertEqual(refusal("notes.txt"), .notAFolder)
+        XCTAssertEqual(refusal("link"), .notAFolder, "a link itself isn't a folder")
+        XCTAssertEqual(refusal("link/inner"), .throughLink, "nothing is read through a link above it")
+        XCTAssertEqual(refusal("Downloads"), .needsFullDiskAccess)
+        XCTAssertEqual(refusal("Downloads/zips"), .needsFullDiskAccess, "inside a protected folder too")
+        XCTAssertNil(FolderAttribution.refusal(home.path + "/Downloads", home: home.path, protected: []), "with Full Disk Access")
     }
 
     func testAClonesPrivateSizeIsZeroUntilItChanges() throws {

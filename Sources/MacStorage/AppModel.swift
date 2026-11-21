@@ -414,10 +414,14 @@ final class AppModel {
         snapshot?.folders[path].map { FolderLevel(entries: $0) } ?? measuredFolders[path]
     }
 
-    /// True when the entry can be opened: a folder with a size (one macOS protects
-    /// without Full Disk Access has none). Sample data only has the levels it ships with.
+    /// True when the entry can be opened: a folder (resolved on disk for scans that didn't
+    /// record it) with a size, or one the scan couldn't read that the app can read now.
+    /// Sample data only has the levels it ships with.
     func canOpen(_ entry: FolderEntry) -> Bool {
-        demo ? snapshot?.folders[folderPath + "/" + entry.name] != nil : entry.isFolder != false && entry.bytes != nil
+        let child = folderPath + "/" + entry.name
+        if demo { return snapshot?.folders[child] != nil }
+        guard !entry.name.contains("/"), entry.name != "..", entry.name != "." else { return false }
+        return (entry.isFolder ?? FileSizes.isDirectory(Self.absolute(child))) && (entry.bytes != nil || fullDiskAccess)
     }
 
     /// Shows the level at `path`, measuring it if the scan didn't. Leaving a level that's
@@ -429,29 +433,45 @@ final class AppModel {
             folderStop.stop()
             measuredFolders[level.key] = nil
         }
-        guard !demo, let snapshot, snapshot.folders[path] == nil, measuredFolders[path] == nil || measuredFolders[path]?.unreadable == true else { return }
+        guard !demo, let snapshot, snapshot.folders[path] == nil, measuredFolders[path] == nil || measuredFolders[path]?.problem != nil else { return }
+        let home = NSHomeDirectory(), full = Self.absolute(path)
+        let protected = fullDiskAccess ? [] : Set(ScanContext.protectedFolders.map { home + "/" + $0 })
+        // Checked before any read: a real folder reached without links, not one macOS protects.
+        if let refusal = FolderAttribution.refusal(full, home: home, protected: protected) {
+            measuredFolders[path] = FolderLevel(problem: refusal)
+            return
+        }
         let stop = StopSignal(), owners = snapshot.owners
         folderStop = stop
-        let full = NSHomeDirectory() + path.dropFirst()
-        let excluded = fullDiskAccess ? [] : Set(ScanContext.protectedFolders.map { NSHomeDirectory() + "/" + $0 })
-        let options = WalkOptions(excluding: excluded, limit: .seconds(30), stop: stop)
+        let options = WalkOptions(excluding: protected, limit: .seconds(30), stop: stop)
         measuredFolders[path] = FolderLevel(listing: true)
         Task {
-            guard let names = await offload({ FolderAttribution.names(in: full) }) else {
-                if !stop.isStopped { measuredFolders[path] = FolderLevel(unreadable: true) }
+            guard let listed = await offload({ FolderAttribution.names(in: full) }) else {
+                if !stop.isStopped { measuredFolders[path] = FolderLevel(problem: .unreadable) }
                 return
             }
             guard !stop.isStopped else { return }
-            measuredFolders[path] = FolderLevel(pending: names.sorted())
-            for name in names.sorted() {
-                let entry = await offload { FolderAttribution.entry(name, in: full, owners: owners, options) }
+            let names = listed.sorted()
+            measuredFolders[path] = FolderLevel(pending: Set(names), total: names.count)
+            // Results are shown in batches, at most four times a second, so a folder with
+            // thousands of small entries doesn't redraw the table for each one.
+            var found: [FolderEntry] = [], done: [String] = [], shown = ContinuousClock.now
+            for (i, name) in names.enumerated() {
+                if let entry = await offload({ FolderAttribution.entry(name, in: full, owners: owners, options) }) { found.append(entry) }
                 // A stopped walk is incomplete: its level was dropped, don't bring it back.
                 guard !stop.isStopped else { return }
-                measuredFolders[path]?.pending.removeAll { $0 == name }
-                if let entry { measuredFolders[path]?.entries.append(entry) }
+                done.append(name)
+                guard i == names.count - 1 || shown.duration(to: .now) > .milliseconds(250) else { continue }
+                measuredFolders[path]?.entries += found
+                measuredFolders[path]?.pending.subtract(done)
+                found = []
+                done = []
+                shown = .now
             }
         }
     }
+
+    private static func absolute(_ path: String) -> String { NSHomeDirectory() + path.dropFirst() }
 
     /// Levels measured for an earlier scan don't match a new one.
     private func forgetMeasuredFolders() {
@@ -468,13 +488,16 @@ final class AppModel {
 struct FolderLevel {
     var entries: [FolderEntry] = []
     /// Entries listed but not measured yet.
-    var pending: [String] = []
+    var pending: Set<String> = []
+    /// How many entries the folder has.
+    var total = 0
     /// True while the folder itself is being listed.
     var listing = false
-    /// True when macOS didn't let the app list the folder.
-    var unreadable = false
+    /// Why the folder wasn't listed.
+    var problem: FolderAttribution.Refusal?
 
     var isMeasuring: Bool { listing || !pending.isEmpty }
+    var measured: Int { total - pending.count }
 }
 
 enum FullDiskAccess {

@@ -10,7 +10,7 @@ struct FoldersView: View {
         if let s = model.snapshot {
             let level = model.folderLevel(model.folderPath)
             // Entries still being measured are listed without a size until they're done.
-            let pending = Set(level?.pending ?? [])
+            let pending = level?.pending ?? []
             let rows = ((level?.entries ?? []) + pending.map { FolderEntry(name: $0, bytes: nil, kind: .personalFiles) }).sorted(using: order)
             HSplitView {
                 VStack(alignment: .leading, spacing: 8) {
@@ -20,12 +20,12 @@ struct FoldersView: View {
                         Text("Select a folder to see its owners; double-click or Return opens it.").font(.caption).foregroundStyle(.secondary)
                     }
                     if s.folders[model.folderPath] == nil, let level {
-                        levelStatus(level, measured: rows.count - pending.count)
+                        levelStatus(level)
                     }
                     Treemap(nodes: rows.compactMap { r in r.bytes.map { TreemapNode(id: r.name, label: r.name, value: Double($0), reclaimable: 0, color: r.kind.color) } },
                             selected: model.selectedFolder) { model.selectedFolder = $0 }
                         .frame(height: 260)
-                    if rows.isEmpty, level?.isMeasuring != true, level?.unreadable != true {
+                    if rows.isEmpty, level?.isMeasuring != true, level?.problem == nil {
                         Callout(s.isPartial && model.folderPath == "~" ? "Folder sizes weren't measured: the scan stopped before they were." : "Nothing here takes space.")
                     }
                     Table(rows, selection: $model.selectedFolder, sortOrder: $order) {
@@ -34,7 +34,9 @@ struct FoldersView: View {
                         }
                         TableColumn("Mostly", value: \.kind.label) { r in Text(r.bytes == nil ? (pending.contains(r.name) ? "" : "Unknown") : r.kind.label).foregroundStyle(.secondary) }.width(140)
                         TableColumn("On disk", value: \.sortBytes) { r in
-                            if let b = r.bytes {
+                            if r.bytes == 0, r.isPartial {
+                                Text("Couldn't be read").foregroundStyle(.secondary)
+                            } else if let b = r.bytes {
                                 HStack(spacing: 4) { Text(formatBytes(b)).monospacedDigit(); if r.isPartial { Text("partial").font(.caption2).foregroundStyle(.secondary) } }
                             } else if pending.contains(r.name) {
                                 Text("Measuring…").foregroundStyle(.secondary)
@@ -72,16 +74,25 @@ struct FoldersView: View {
         }
     }
 
-    /// For a level measured after the scan: progress, or why it couldn't be listed.
-    @ViewBuilder private func levelStatus(_ level: FolderLevel, measured: Int) -> some View {
-        if level.unreadable {
+    /// For a level measured after the scan: progress, or why it wasn't listed.
+    @ViewBuilder private func levelStatus(_ level: FolderLevel) -> some View {
+        switch level.problem {
+        case .needsFullDiskAccess?:
+            Callout("macOS protects this folder: the app reads it only with Full Disk Access.") {
+                Button("Open Privacy & Security…", action: FullDiskAccess.openSettings).buttonStyle(.link)
+            }
+        case .throughLink?:
+            Callout("This folder is reached through a link now. The app doesn't follow links; scan again to see where things are.")
+        case .notAFolder?:
+            Callout("This isn't a folder anymore. Scan again to see what's here now.")
+        case .unreadable?:
             Callout("macOS didn't let the app list this folder.")
-        } else if level.isMeasuring {
+        case nil where level.isMeasuring:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text(level.listing ? "Listing this folder…" : "Measuring \(measured + 1) of \(measured + level.pending.count)…").foregroundStyle(.secondary)
+                Text(level.listing ? "Listing this folder…" : "Measuring \(level.measured) of \(level.total)…").foregroundStyle(.secondary)
             }
-        } else {
+        case nil:
             Text("Measured when you opened it, after the scan. Owners are matched to the scan's items.").font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -126,6 +137,10 @@ struct FolderDetail: View {
                     }
                 } else if measuring.contains(f.name) {
                     Callout("Measuring this folder…")
+                } else if model.canOpen(f) {
+                    // Protected when the scan ran; readable now that Full Disk Access is on.
+                    Callout("The scan couldn't read this folder. Open it to measure it now.")
+                    Button("Open") { model.openFolder(model.folderPath + "/" + f.name) }
                 } else {
                     Callout("macOS doesn't let the app read this folder without Full Disk Access, so its size is part of “Not attributed yet”.")
                     Button("Open Privacy & Security…", action: FullDiskAccess.openSettings)

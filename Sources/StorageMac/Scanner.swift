@@ -171,6 +171,21 @@ public enum FolderAttribution {
         return result
     }
 
+    /// Why a folder can't be opened in By folder.
+    public enum Refusal: Sendable {
+        case notAFolder, throughLink, needsFullDiskAccess, unreadable
+    }
+
+    /// Why `path` (inside `home`) mustn't be read, or nil when it can be: it must be a real
+    /// folder reached without following links, and not inside a folder in `protected`.
+    /// Checked right before listing; the walks below it never follow links themselves.
+    public static func refusal(_ path: String, home: String, protected: Set<String>) -> Refusal? {
+        guard FileSizes.isDirectory(path) else { return .notAFolder }
+        guard path.hasPrefix(home + "/"), let real = FileSizes.realPath(path), let realHome = FileSizes.realPath(home),
+              real == realHome + path.dropFirst(home.count) else { return .throughLink }
+        return protected.contains { isInside(path, $0) } ? .needsFullDiskAccess : nil
+    }
+
     /// The names directly inside `path`, or nil when it can't be listed.
     public static func names(in path: String) -> [String]? {
         try? FileManager.default.contentsOfDirectory(atPath: path)
@@ -183,7 +198,8 @@ public enum FolderAttribution {
         let full = path + "/" + name
         if options.excluding.contains(full) { return FolderEntry(name: name, bytes: nil, kind: .personalFiles, isFolder: true) }
         let size = FileSizes.measure(full, options)
-        guard size.allocated > 0 else { return nil }
+        // Nothing that takes no space; one that couldn't be read is kept, as a lower bound.
+        guard size.allocated > 0 || !size.isComplete else { return nil }
         let shares = owners.compactMap { o -> OwnerShare? in
             let bytes = o.items.filter { isInside($0.path, full) }.compactMap(\.onDisk.bytes).reduce(0, +)
             return bytes > 0 ? OwnerShare(ownerID: o.id, bytes: bytes) : nil

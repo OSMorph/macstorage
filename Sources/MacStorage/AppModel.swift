@@ -44,7 +44,8 @@ final class AppModel {
     private(set) var snapshot: Snapshot? {
         didSet {
             refreshPlan()
-            if oldValue?.date != snapshot?.date { forgetMeasuredFolders() }
+            // Levels measured for another scan, or during a first scan, don't match this one.
+            if oldValue?.date != snapshot?.date || oldValue?.isPartial != snapshot?.isPartial { forgetMeasuredFolders() }
         }
     }
     private(set) var history = History()
@@ -62,11 +63,8 @@ final class AppModel {
     /// The By folder level shown ("~", "~/Library/Caches"). Change it with `openFolder`.
     private(set) var folderPath = "~"
     var selectedFolder: String?
-    /// Levels below what the scan measured, measured when opened, by path.
-    private(set) var measuredFolders: [String: FolderLevel] = [:]
-    private var folderStop = StopSignal()
-    /// The level being measured now, if any.
-    private var measuringFolder: String?
+    /// Levels below what the scan measured, measured when opened.
+    let measuredFolders = FolderMeasurements()
     var search = ""
     /// A run History should open (from "View its receipt" or the results).
     var openRunID: UUID?
@@ -179,10 +177,8 @@ final class AppModel {
         guard granted != fullDiskAccess else { return }
         fullDiskAccess = granted
         // Levels measured with the other access list different folders as protected.
-        folderStop.stop()
-        measuringFolder = nil
-        measuredFolders = [:]
-        if snapshot?.folders[folderPath] == nil { openFolder(folderPath) }
+        measuredFolders.forget()
+        openFolder(folderPath)
     }
 
     // MARK: Scanning
@@ -414,133 +410,42 @@ final class AppModel {
     /// The entries at `path`: the scan's for the home folder and Library, otherwise those
     /// measured since it was opened.
     func folderLevel(_ path: String) -> FolderLevel? {
-        snapshot?.folders[path].map { FolderLevel(entries: $0) } ?? measuredFolders[path]
+        snapshot?.folders[path].map { FolderLevel(entries: $0) } ?? measuredFolders.levels[path]
     }
 
-    /// True when the entry can be opened: a folder (resolved on disk for scans that didn't
+    /// True when the entry can be opened: a folder (checked on disk for scans that didn't
     /// record it) with a size, or one the scan couldn't read that the app can read now.
     /// Sample data only has the levels it ships with.
     func canOpen(_ entry: FolderEntry) -> Bool {
         let child = folderPath + "/" + entry.name
         if demo { return snapshot?.folders[child] != nil }
         guard !entry.name.contains("/"), entry.name != "..", entry.name != "." else { return false }
-        return (entry.isFolder ?? FileSizes.isDirectory(Self.absolute(child))) && (entry.bytes != nil || fullDiskAccess)
+        return isFolder(entry) && (entry.bytes != nil || fullDiskAccess)
     }
 
-    /// Shows the level at `path`, measuring it if the scan didn't. Leaving a level that's
-    /// still being measured pauses it: what's measured is kept and the rest is measured on
-    /// returning (the entry in progress starts over).
+    /// Whether the entry is a folder, checked on disk for scans saved before 0.1.2.
+    func isFolder(_ entry: FolderEntry) -> Bool {
+        if demo { return entry.isFolder ?? true }
+        return entry.isFolder ?? FileSizes.isDirectory(NSHomeDirectory() + (folderPath + "/" + entry.name).dropFirst())
+    }
+
+    /// Shows the level at `path`. One the scan didn't measure is measured now (a complete
+    /// scan's only: a first scan's levels aren't in yet); leaving it pauses that.
     func openFolder(_ path: String) {
         folderPath = path
         selectedFolder = nil
-        if let measuring = measuringFolder, measuring != path {
-            folderStop.stop()
-            measuringFolder = nil
-            if measuredFolders[measuring]?.listing == true { measuredFolders[measuring] = nil }
-        }
-        guard !demo, let snapshot, snapshot.folders[path] == nil, measuringFolder != path else { return }
-        if let level = measuredFolders[path], level.problem == nil {
-            if !level.pending.isEmpty { measure(path, level.pending.sorted(), owners: snapshot.owners) }
-            return
-        }
-        let home = NSHomeDirectory(), full = Self.absolute(path)
-        // Checked before any read: a real folder reached without links, not one macOS protects.
-        if let refusal = FolderAttribution.refusal(full, home: home, protected: protectedFolders) {
-            measuredFolders[path] = FolderLevel(problem: refusal)
-            return
-        }
-        measuredFolders[path] = FolderLevel(listing: true)
-        let stop = startMeasuring(path)
-        Task {
-            guard let listed = await offload({ FolderAttribution.names(in: full) }) else {
-                if !stop.isStopped { measuredFolders[path] = FolderLevel(problem: .unreadable); measuringFolder = nil }
-                return
-            }
-            guard !stop.isStopped else { return }
-            let names = listed.sorted()
-            measuredFolders[path]?.listing = false
-            measuredFolders[path]?.pending = Set(names)
-            measuredFolders[path]?.total = names.count
-            measure(path, names, owners: snapshot.owners, stop: stop)
-        }
+        guard !demo, let snapshot, !snapshot.isPartial, snapshot.folders[path] == nil else { return measuredFolders.pause() }
+        let protected = fullDiskAccess ? [] : Set(ScanContext.protectedFolders.map { NSHomeDirectory() + "/" + $0 })
+        measuredFolders.open(path, owners: snapshot.owners, protected: protected)
     }
 
-    /// Folders the app mustn't read now: the protected ones, without Full Disk Access.
-    private var protectedFolders: Set<String> {
-        fullDiskAccess ? [] : Set(ScanContext.protectedFolders.map { NSHomeDirectory() + "/" + $0 })
-    }
-
-    private func startMeasuring(_ path: String) -> StopSignal {
-        let stop = StopSignal()
-        folderStop = stop
-        measuringFolder = path
-        return stop
-    }
-
-    /// Measures `names` in the level at `path`, adding each entry as it's measured.
-    private func measure(_ path: String, _ names: [String], owners: [Owner], stop: StopSignal? = nil) {
-        guard let level = measuredFolders[path]?.id else { return }
-        let stop = stop ?? startMeasuring(path), full = Self.absolute(path)
-        /// Adds results to the level they were measured for, once: a paused run's last
-        /// results can arrive after a resumed run measured the same names.
-        func record(_ found: [FolderEntry], _ done: [String]) {
-            guard measuredFolders[path]?.id == level, let pending = measuredFolders[path]?.pending else { return }
-            measuredFolders[path]?.entries += found.filter { pending.contains($0.name) }
-            measuredFolders[path]?.pending.subtract(done)
-        }
-        let options = WalkOptions(excluding: protectedFolders, limit: .seconds(30), stop: stop)
-        Task {
-            // Results are shown in batches, at most four times a second, so a folder with
-            // thousands of small entries doesn't redraw the table for each one.
-            var found: [FolderEntry] = [], done: [String] = [], shown = ContinuousClock.now
-            for (i, name) in names.enumerated() {
-                let entry = await offload { FolderAttribution.entry(name, in: full, owners: owners, options) }
-                // A stopped walk is incomplete: leave that entry pending.
-                guard !stop.isStopped else { break }
-                if let entry { found.append(entry) }
-                done.append(name)
-                guard i == names.count - 1 || shown.duration(to: .now) > .milliseconds(250) else { continue }
-                record(found, done)
-                found = []
-                done = []
-                shown = .now
-            }
-            // Paused or finished: keep what was measured.
-            record(found, done)
-            if !stop.isStopped { measuringFolder = nil }
-        }
-    }
-
-    private static func absolute(_ path: String) -> String { NSHomeDirectory() + path.dropFirst() }
-
-    /// Levels measured for an earlier scan don't match a new one.
     private func forgetMeasuredFolders() {
-        folderStop.stop()
-        measuringFolder = nil
-        measuredFolders = [:]
+        measuredFolders.forget()
         if snapshot?.folders[folderPath] == nil { folderPath = "~"; selectedFolder = nil }
     }
 
     /// For the automated screenshot tour: show the welcome screen without data.
     func setSnapshot(_ s: Snapshot?) { snapshot = s }
-}
-
-/// One By folder level measured when it was opened.
-struct FolderLevel {
-    /// Tells this level from one measured again later at the same path.
-    let id = UUID()
-    var entries: [FolderEntry] = []
-    /// Entries listed but not measured yet.
-    var pending: Set<String> = []
-    /// How many entries the folder has.
-    var total = 0
-    /// True while the folder itself is being listed.
-    var listing = false
-    /// Why the folder wasn't listed.
-    var problem: FolderAttribution.Refusal?
-
-    var isMeasuring: Bool { listing || !pending.isEmpty }
-    var measured: Int { total - pending.count }
 }
 
 enum FullDiskAccess {

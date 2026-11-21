@@ -173,16 +173,20 @@ public enum FolderAttribution {
 
     /// Why a folder can't be opened in By folder.
     public enum Refusal: Sendable {
-        case notAFolder, throughLink, needsFullDiskAccess, unreadable
+        case notAFolder, throughLink, otherVolume, needsFullDiskAccess, unreadable
     }
 
     /// Why `path` (inside `home`) mustn't be read, or nil when it can be: it must be a real
-    /// folder reached without following links, and not inside a folder in `protected`.
-    /// Checked right before listing; the walks below it never follow links themselves.
+    /// folder reached without following links, on the home folder's volume, and not inside
+    /// a folder in `protected`. Checked right before listing; the walks below it never
+    /// follow links or leave the volume themselves. (A link swapped in between this check
+    /// and the listing would be listed once: same user, read only.)
     public static func refusal(_ path: String, home: String, protected: Set<String>) -> Refusal? {
-        guard FileSizes.isDirectory(path) else { return .notAFolder }
+        var st = stat(), homeStat = stat()
+        guard lstat(path, &st) == 0, st.st_mode & S_IFMT == S_IFDIR else { return .notAFolder }
         guard path.hasPrefix(home + "/"), let real = FileSizes.realPath(path), let realHome = FileSizes.realPath(home),
               real == realHome + path.dropFirst(home.count) else { return .throughLink }
+        guard stat(home, &homeStat) == 0, st.st_dev == homeStat.st_dev else { return .otherVolume }
         return protected.contains { isInside(path, $0) } ? .needsFullDiskAccess : nil
     }
 
@@ -200,7 +204,10 @@ public enum FolderAttribution {
         let size = FileSizes.measure(full, options)
         // Nothing that takes no space; one that couldn't be read is kept, as a lower bound.
         guard size.allocated > 0 || !size.isComplete else { return nil }
-        let shares = owners.compactMap { o -> OwnerShare? in
+        // An item that holds this entry (it's inside the item's folder) claims all of it;
+        // otherwise the items inside it claim their sizes.
+        let holder = owners.first { $0.items.contains { item in item.path.map { $0 != full && isInside(full, $0) } ?? false } }
+        let shares = holder.map { [OwnerShare(ownerID: $0.id, bytes: size.allocated)] } ?? owners.compactMap { o -> OwnerShare? in
             let bytes = o.items.filter { isInside($0.path, full) }.compactMap(\.onDisk.bytes).reduce(0, +)
             return bytes > 0 ? OwnerShare(ownerID: o.id, bytes: bytes) : nil
         }.sorted { $0.bytes > $1.bytes }

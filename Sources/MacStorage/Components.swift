@@ -175,9 +175,11 @@ struct Treemap: View {
         let live = nodes.filter { $0.value > 0 }
         let total = live.map(\.value).reduce(0, +)
         guard total > 0, area > 0 else { return [] }
-        let small = live.filter { $0.value / total < 1_600 / area }
+        // One pass each way: a folder can have a hundred thousand entries.
+        let threshold = total * 1_600 / area
+        let small = live.filter { $0.value < threshold }
         guard small.count > 1 else { return live }
-        return live.filter { n in !small.contains { $0.id == n.id } }
+        return live.filter { $0.value >= threshold }
             + [TreemapNode(id: smallerID, label: "\(small.count) smaller", value: small.map(\.value).reduce(0, +), reclaimable: 0, color: .gray)]
     }
 

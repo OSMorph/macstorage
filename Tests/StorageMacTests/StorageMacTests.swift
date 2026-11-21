@@ -50,6 +50,9 @@ final class FileSizesTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(folder.bytes ?? 0, 1 << 20)
         XCTAssertEqual(folder.owners.map(\.ownerID), ["logs"])
         XCTAssertEqual(folder.kind, .system)
+        let held = try XCTUnwrap(FolderAttribution.entry("big.bin", in: sub.path, owners: owners, options))
+        XCTAssertEqual(held.owners.map(\.ownerID), ["logs"], "inside an owner's folder, the owner claims it")
+        XCTAssertEqual(held.owners.first?.bytes, held.bytes)
         let file = try XCTUnwrap(FolderAttribution.entry("notes.txt", in: dir.path, owners: owners, options))
         XCTAssertEqual(file.isFolder, false, "a file can't be opened")
         XCTAssertEqual(file.kind, .personalFiles)
@@ -549,6 +552,104 @@ final class VolumeTests: XCTestCase {
         XCTAssertTrue(SystemProvider.isMountPoint("/"))
         XCTAssertFalse(SystemProvider.isMountPoint(NSTemporaryDirectory()))
         XCTAssertNil(SystemProvider.volumeUsed("/System/Volumes/Data/private"))
+    }
+}
+
+@MainActor
+final class FolderMeasurementsTests: XCTestCase {
+    var home: URL!
+    let names = (1...10).map { "entry\($0)" }
+
+    override func setUpWithError() throws {
+        home = FileManager.default.temporaryDirectory.appending(path: "macstorage-home-\(UUID().uuidString)")
+        for d in ["A", "B", "Downloads"] { try FileManager.default.createDirectory(at: home.appending(path: d), withIntermediateDirectories: true) }
+    }
+
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: home) }
+
+    /// Lists `names` everywhere (after `listDelay`) and measures each entry in `delay`,
+    /// stopping early when asked. Counts the reads.
+    final class Disk: @unchecked Sendable {
+        let lock = NSLock()
+        var reads: [String] = []
+        let names: [String], delay: TimeInterval, listDelay: TimeInterval
+        init(names: [String], delay: TimeInterval = 0.002, listDelay: TimeInterval = 0) {
+            self.names = names
+            self.delay = delay
+            self.listDelay = listDelay
+        }
+
+        func measurements(home: String) -> FolderMeasurements {
+            FolderMeasurements(home: home, list: { folder in
+                self.lock.withLock { self.reads.append(folder) }
+                Thread.sleep(forTimeInterval: self.listDelay)
+                return self.names
+            }, measure: { name, _, _, options in
+                let end = Date().addingTimeInterval(self.delay)
+                while Date() < end { if options.stop?.isStopped == true { return nil }; Thread.sleep(forTimeInterval: 0.001) }
+                return FolderEntry(name: name, bytes: 1_000, kind: .personalFiles, isFolder: false)
+            }, flushInterval: .milliseconds(20))
+        }
+    }
+
+    func waitUntil(_ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(10)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("timed out") }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func testALevelIsListedAndMeasured() async throws {
+        let m = Disk(names: names).measurements(home: home.path)
+        m.open("~/A", owners: [], protected: [])
+        try await waitUntil { m.levels["~/A"]?.isMeasuring == false }
+        XCTAssertEqual(m.levels["~/A"]?.entries.map(\.name).sorted(), names.sorted())
+        XCTAssertEqual(m.levels["~/A"]?.measured, 10)
+        XCTAssertNil(m.measuring)
+    }
+
+    func testLeavingPausesAndReturningResumesWithoutDuplicates() async throws {
+        let m = Disk(names: names, delay: 0.03).measurements(home: home.path)
+        m.open("~/A", owners: [], protected: [])
+        try await waitUntil { (m.levels["~/A"]?.measured ?? 0) >= 3 }
+        m.open("~/B", owners: [], protected: [])
+        let paused = try XCTUnwrap(m.levels["~/A"])
+        XCTAssertFalse(paused.pending.isEmpty, "the rest of A waits")
+        XCTAssertGreaterThanOrEqual(paused.entries.count, 3, "what A measured is kept")
+        try await waitUntil { m.levels["~/B"]?.isMeasuring == false }
+        m.open("~/A", owners: [], protected: [])
+        try await waitUntil { m.levels["~/A"]?.isMeasuring == false }
+        XCTAssertEqual(m.levels["~/A"]?.entries.map(\.name).sorted(), names.sorted(), "each entry once")
+    }
+
+    func testForgottenLevelsDontComeBack() async throws {
+        let m = Disk(names: names, delay: 0.03).measurements(home: home.path)
+        m.open("~/A", owners: [], protected: [])
+        try await waitUntil { (m.levels["~/A"]?.measured ?? 0) >= 1 }
+        m.forget()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(m.levels.isEmpty, "late results of a forgotten level are dropped")
+        XCTAssertNil(m.measuring)
+    }
+
+    func testALevelLeftWhileListingIsDropped() async throws {
+        let m = Disk(names: names, listDelay: 0.2).measurements(home: home.path)
+        m.open("~/A", owners: [], protected: [])
+        m.open("~/B", owners: [], protected: [])
+        XCTAssertNil(m.levels["~/A"])
+        try await waitUntil { m.levels["~/B"]?.isMeasuring == false }
+        XCTAssertNil(m.levels["~/A"], "its listing arriving late doesn't bring it back")
+    }
+
+    func testARefusedFolderIsNeverRead() async throws {
+        let disk = Disk(names: names)
+        let m = disk.measurements(home: home.path)
+        m.open("~/Downloads", owners: [], protected: [home.appending(path: "Downloads").path])
+        m.open("~/missing", owners: [], protected: [])
+        XCTAssertEqual(m.levels["~/Downloads"]?.problem, .needsFullDiskAccess)
+        XCTAssertEqual(m.levels["~/missing"]?.problem, .notAFolder)
+        XCTAssertTrue(disk.lock.withLock { disk.reads.isEmpty })
     }
 }
 

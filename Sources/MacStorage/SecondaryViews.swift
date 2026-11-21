@@ -1,47 +1,51 @@
 import Charts
 import StorageCore
+import StorageMac
 import SwiftUI
 
 struct FoldersView: View {
     @Bindable var model: AppModel
     @State private var order = [KeyPathComparator(\FolderEntry.sortBytes, order: .reverse)]
 
+    /// The table shows this many entries at most, the largest first: a folder can hold a
+    /// hundred thousand.
+    static let rowLimit = 2_000
+
     var body: some View {
         if let s = model.snapshot {
             let level = model.folderLevel(model.folderPath)
-            // Entries still being measured are listed without a size until they're done.
-            let pending = level?.pending ?? []
-            let rows = ((level?.entries ?? []) + pending.map { FolderEntry(name: $0, bytes: nil, kind: .personalFiles) }).sorted(using: order)
+            let all = level?.entries ?? []
+            let rows = all.count > Self.rowLimit
+                ? Array(all.sorted { $0.sortBytes > $1.sortBytes }.prefix(Self.rowLimit)).sorted(using: order)
+                : all.sorted(using: order)
             HSplitView {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        breadcrumbs
-                        Spacer()
-                        Text("Select a folder to see its owners; double-click or Return opens it.").font(.caption).foregroundStyle(.secondary)
-                    }
+                    breadcrumbs
+                    Text("Select a folder to see its owners; double-click or Return opens it.").font(.caption).foregroundStyle(.secondary)
                     if s.folders[model.folderPath] == nil, let level {
                         levelStatus(level)
                     }
-                    Treemap(nodes: rows.compactMap { r in r.bytes.map { TreemapNode(id: r.name, label: r.name, value: Double($0), reclaimable: 0, color: r.kind.color) } },
+                    // The treemap folds slivers into one cell; it gets the largest entries only.
+                    Treemap(nodes: rows.sorted { $0.sortBytes > $1.sortBytes }.prefix(200).compactMap { r in
+                                r.bytes.map { TreemapNode(id: r.name, label: r.name, value: Double($0), reclaimable: 0, color: r.kind.color) }
+                            },
                             selected: model.selectedFolder) { model.selectedFolder = $0 }
                         .frame(height: 260)
-                    if rows.isEmpty, level?.isMeasuring != true, level?.problem == nil {
+                    if all.isEmpty, level?.isMeasuring != true, level?.problem == nil {
                         Callout(s.isPartial && model.folderPath == "~" ? "Folder sizes weren't measured: the scan stopped before they were." : "Nothing here takes space.")
                     }
                     Table(rows, selection: $model.selectedFolder, sortOrder: $order) {
                         TableColumn("Name", value: \.name) { r in
-                            Label(r.name, systemImage: r.isFolder == false ? "doc" : "folder")
+                            Label(r.name, systemImage: model.isFolder(r) ? "folder" : "doc")
                         }
-                        TableColumn("Mostly", value: \.kind.label) { r in Text(r.bytes == nil ? (pending.contains(r.name) ? "" : "Unknown") : r.kind.label).foregroundStyle(.secondary) }.width(140)
+                        TableColumn("Mostly", value: \.kind.label) { r in Text(r.bytes == nil ? "Unknown" : r.kind.label).foregroundStyle(.secondary) }.width(140)
                         TableColumn("On disk", value: \.sortBytes) { r in
                             if r.bytes == 0, r.isPartial {
                                 Text("Couldn't be read").foregroundStyle(.secondary)
                             } else if let b = r.bytes {
                                 HStack(spacing: 4) { Text(formatBytes(b)).monospacedDigit(); if r.isPartial { Text("partial").font(.caption2).foregroundStyle(.secondary) } }
-                            } else if pending.contains(r.name) {
-                                Text("Measuring…").foregroundStyle(.secondary)
                             } else {
-                                Text(model.fullDiskAccess || model.demo ? "Not scanned yet" : "Needs Full Disk Access").foregroundStyle(.secondary)
+                                Text(model.fullDiskAccess || model.demo ? "Not read by the scan" : "Needs Full Disk Access").foregroundStyle(.secondary)
                             }
                         }.width(170)
                     }
@@ -50,9 +54,13 @@ struct FoldersView: View {
                             model.openFolder(model.folderPath + "/" + id)
                         }
                     }
+                    if all.count > rows.count {
+                        let rest = all.count - rows.count
+                        Text("The \(Self.rowLimit.formatted()) largest are listed; \(rest.formatted()) smaller ones aren't.").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 .padding(16).frame(minWidth: 480)
-                FolderDetail(model: model, snapshot: s, folder: rows.first { $0.name == model.selectedFolder }, measuring: pending)
+                FolderDetail(model: model, snapshot: s, folder: rows.first { $0.name == model.selectedFolder })
                     .frame(minWidth: 280, idealWidth: 320)
             }
         }
@@ -85,12 +93,14 @@ struct FoldersView: View {
             Callout("This folder is reached through a link now. The app doesn't follow links; scan again to see where things are.")
         case .notAFolder?:
             Callout("This isn't a folder anymore. Scan again to see what's here now.")
+        case .otherVolume?:
+            Callout("This is another volume. The app measures the startup disk only.")
         case .unreadable?:
             Callout("macOS didn't let the app list this folder.")
         case nil where level.isMeasuring:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text(level.listing ? "Listing this folder…" : "Measuring \(level.measured) of \(level.total)…").foregroundStyle(.secondary)
+                Text(level.listing ? "Listing this folder…" : "Measured \(level.measured.formatted()) of \(level.total.formatted())…").foregroundStyle(.secondary)
             }
         case nil:
             Text("Measured when you opened it, after the scan. Owners are matched to the scan's items.").font(.caption).foregroundStyle(.secondary)
@@ -107,8 +117,6 @@ struct FolderDetail: View {
     let model: AppModel
     let snapshot: Snapshot
     let folder: FolderEntry?
-    /// Entries of this level still being measured.
-    var measuring: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -130,13 +138,14 @@ struct FolderDetail: View {
                             }
                         }
                     }
-                    if f.owners.isEmpty { Callout("No owner claims this \(f.isFolder == false ? "file" : "folder"). It counts as personal files or “Not attributed yet”.") }
+                    if f.owners.isEmpty { Callout("No owner claims this \(model.isFolder(f) ? "folder" : "file"). It counts as personal files or “Not attributed yet”.") }
                     HStack {
                         Button("Reveal in Finder") { revealInFinder("\(model.folderPath)/\(f.name)") }
                         if model.canOpen(f) { Button("Open") { model.openFolder(model.folderPath + "/" + f.name) } }
                     }
-                } else if measuring.contains(f.name) {
-                    Callout("Measuring this folder…")
+                    if model.demo, !model.canOpen(f), model.isFolder(f) {
+                        Text("The sample data only goes inside Library.").font(.caption).foregroundStyle(.secondary)
+                    }
                 } else if model.canOpen(f) {
                     // Protected when the scan ran; readable now that Full Disk Access is on.
                     Callout("The scan couldn't read this folder. Open it to measure it now.")

@@ -9,6 +9,13 @@ public struct Snapshot: Codable, Equatable, Sendable {
     public var coverage: [CoverageEntry]
     /// Folder sizes for the By folder view, keyed by path ("~", "~/Library").
     public var folders: [String: [FolderEntry]]
+    /// How sizes were measured; nil for a scan saved by version 0.1.0 (see `migrated()`).
+    public var format: Int? = Snapshot.currentFormat
+
+    /// Version 2 measures each APFS volume's own used space (0.1.0 read the container's).
+    public static let currentFormat = 2
+    /// Owners 0.1.0 sized from a whole APFS volume, so with the container's used space.
+    public static let legacyVolumeOwners: Set<String> = ["macos", "nix"]
 
     public init(date: Date, scanDuration: TimeInterval, disk: DiskUsage, owners: [Owner],
                 coverage: [CoverageEntry], folders: [String: [FolderEntry]] = [:]) {
@@ -20,10 +27,11 @@ public struct Snapshot: Codable, Equatable, Sendable {
         self.folders = folders
     }
 
-    /// Space on the Data volume that no owner accounts for.
-    public var unattributed: Int64 {
+    /// Space on the Data volume that no owner accounts for, or nil when the Data volume
+    /// wasn't measured.
+    public var unattributed: Int64? {
         let attributed = owners.filter { !$0.isOwnVolume }.map(\.hostOnDisk).reduce(0, +)
-        return max(0, disk.dataVolumeUsed - attributed)
+        return disk.dataVolumeUsed.map { max(0, $0 - attributed) }
     }
 
     public func owner(_ id: String) -> Owner? { owners.first { $0.id == id } }
@@ -34,20 +42,23 @@ public struct Snapshot: Codable, Equatable, Sendable {
     /// Areas the scan didn't finish.
     public var unfinishedAreas: [String] { coverage.filter { $0.status == .stopped }.map(\.area) }
 
-    /// The snapshot with sizes that can't be true marked as not measured: an item on the
-    /// Mac larger than the disk's used space (version 0.1.0 read each macOS volume's size
-    /// as the whole APFS container's), and a Data volume larger than that space.
-    /// Sizes inside a VM are left alone: they describe the VM's disk, not the Mac's.
-    public func removingImpossibleSizes() -> Snapshot {
+    /// A scan saved by version 0.1.0, with what it measured wrongly marked not measured:
+    /// the macOS and Nix volumes and the Data volume, all read as the APFS container's used
+    /// space. Everything else it measured stands.
+    public func migrated() -> Snapshot {
+        guard format == nil else { return self }
         var s = self
-        let used = disk.used
-        s.disk.dataVolumeUsed = min(disk.dataVolumeUsed, used)
-        for o in s.owners.indices where s.owners[o].hostBytes == nil && s.owners[o].hostSizeUnknown != true {
-            for i in s.owners[o].items.indices where (s.owners[o].items[i].onDisk.bytes ?? 0) > used {
+        s.format = Self.currentFormat
+        s.disk.dataVolumeUsed = nil
+        for o in s.owners.indices where Self.legacyVolumeOwners.contains(s.owners[o].id) {
+            for i in s.owners[o].items.indices where [.macOSVolume, .nixLive].contains(s.owners[o].items[i].kind) {
                 s.owners[o].items[i].onDisk = .notMeasured
-                if (s.owners[o].items[i].reclaimable.bytes ?? 0) > used { s.owners[o].items[i].reclaimable = .notMeasured }
             }
         }
+        s.coverage.removeAll { $0.area == "Volumes" }
+        s.coverage.append(CoverageEntry(area: "Volumes", status: .notMeasured,
+                                        detail: "This scan was saved by version 0.1.0, which misread the macOS, Nix and Data volumes' sizes. Scan again to measure them."))
+        s.coverage.sort { $0.area < $1.area }
         return s
     }
 }
@@ -57,10 +68,11 @@ public struct DiskUsage: Codable, Equatable, Sendable {
     public var free: Int64
     /// Space macOS can free on its own when needed (caches it manages, purgeable snapshots).
     public var purgeable: Int64
-    /// Used space on the Data volume (where the user's files and caches live).
-    public var dataVolumeUsed: Int64
+    /// Used space on the Data volume (where the user's files and caches live), or nil when
+    /// it couldn't be measured.
+    public var dataVolumeUsed: Int64?
 
-    public init(total: Int64, free: Int64, purgeable: Int64, dataVolumeUsed: Int64) {
+    public init(total: Int64, free: Int64, purgeable: Int64, dataVolumeUsed: Int64?) {
         self.total = total
         self.free = free
         self.purgeable = purgeable

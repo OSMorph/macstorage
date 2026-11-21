@@ -15,8 +15,9 @@ struct OverviewView: View {
                         TierTile(tier: .probablySafe, accounting: acc, action: nil)
                         Tile(title: { TierBadge(tier: .review) }, value: formatBytes(acc.reviewOnDisk), unit: "on disk",
                              note: "Your own data. Nothing estimated: only you can decide what goes.")
-                        Tile(title: { Text(s.isPartial ? "Not scanned or attributed yet" : "Not attributed yet") }, value: formatBytes(s.unattributed), unit: "on disk",
-                             note: s.isPartial ? partialNote(s)
+                        Tile(title: { Text(s.isPartial ? "Not scanned or attributed yet" : "Not attributed yet") }, value: formatBytes(acc.unattributedOnDisk), unit: "on disk",
+                             note: s.disk.dataVolumeUsed == nil ? "Everything no owner accounts for, including local snapshots and other volumes: the Data volume wasn't measured. Scan again to separate them."
+                                : s.isPartial ? partialNote(s)
                                 : model.fullDiskAccess || model.demo ? "Mostly outside your home folder (/Applications, /Library, /private), which this scan didn't measure."
                                 : "Folders macOS hides without Full Disk Access, plus places outside your home folder this scan didn't measure.",
                              link: ("See scan coverage", { model.section = .coverage }))

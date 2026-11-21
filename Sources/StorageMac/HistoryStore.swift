@@ -23,8 +23,8 @@ public struct HistoryStore: Sendable {
     private var historyURL: URL { folder.appending(path: "history.json") }
     private func runURL(_ id: UUID) -> URL { folder.appending(path: "Runs/\(id.uuidString).json") }
 
-    /// The latest scan. One saved by version 0.1.0 has its macOS volumes marked not measured.
-    public func loadSnapshot() -> Snapshot? { (load(snapshotURL) as Snapshot?)?.removingImpossibleSizes() }
+    /// The latest scan. One saved by version 0.1.0 has its misread volume sizes marked not measured.
+    public func loadSnapshot() -> Snapshot? { (load(snapshotURL) as Snapshot?)?.migrated() }
 
     public enum StoreError: Error, LocalizedError {
         case unreadableHistoryNotPreserved

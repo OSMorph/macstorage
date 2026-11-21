@@ -57,13 +57,15 @@ public struct ScanSummary: Codable, Equatable, Sendable {
     /// a gap in their history, not a zero.
     public var unmeasured: Set<String>? = nil
 
+    /// How sizes were measured; nil for a scan recorded by version 0.1.0.
+    public var format: Int? = Snapshot.currentFormat
+
     /// The owner's size in this scan, or nil when it wasn't measured. An owner that didn't
-    /// exist is 0. A size above the disk's used space can't be true (version 0.1.0 read
-    /// each macOS volume as the whole APFS container), so it counts as unmeasured.
+    /// exist is 0. Version 0.1.0 read the macOS and Nix volumes as the whole APFS
+    /// container, so its sizes for them count as unmeasured.
     public func size(_ ownerID: String) -> Int64? {
-        guard unmeasured?.contains(ownerID) != true else { return nil }
-        let size = owners[ownerID] ?? 0
-        return size > used ? nil : size
+        if unmeasured?.contains(ownerID) == true || (format == nil && Snapshot.legacyVolumeOwners.contains(ownerID)) { return nil }
+        return owners[ownerID] ?? 0
     }
 
     public init(date: Date, used: Int64, free: Int64, owners: [String: Int64], names: [String: String], events: [ScanEvent] = []) {
@@ -79,7 +81,8 @@ public struct ScanSummary: Codable, Equatable, Sendable {
         self.init(date: snapshot.date, used: snapshot.disk.used, free: snapshot.disk.free,
                   owners: Dictionary(snapshot.owners.filter { $0.hostSizeUnknown != true }.map { ($0.id, $0.hostOnDisk) }, uniquingKeysWith: +),
                   names: Dictionary(snapshot.owners.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a }), events: events)
-        let unknown = Set(snapshot.owners.filter { $0.hostSizeUnknown == true || $0.onDiskMeasure == .notMeasured }.map(\.id))
+        // A total that leaves out a whole item would read as a change once it's measured.
+        let unknown = Set(snapshot.owners.filter { $0.hostSizeUnknown == true || $0.onDiskMeasure == .notMeasured || $0.isMissingParts }.map(\.id))
         unmeasured = unknown.isEmpty ? nil : unknown
     }
 }

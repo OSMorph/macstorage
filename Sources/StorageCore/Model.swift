@@ -305,13 +305,25 @@ public struct Owner: Codable, Identifiable, Equatable, Sendable {
     /// couldn't be measured (the sizes inside a VM say nothing reliable about the disk file).
     public var hostOnDisk: Int64 { hostSizeUnknown == true ? 0 : onDisk }
 
+    /// True when an item that adds to the total wasn't measured (a macOS volume that didn't
+    /// report its size), so the total leaves part of the owner out.
+    public var isMissingParts: Bool {
+        hostBytes == nil && items.contains { $0.onDisk.bytes == nil && !$0.kind.isCountedInAnotherItem }
+    }
+
     /// `onDisk` as shown: unknown when the VM disk couldn't be measured, not measured when
-    /// none of its items was, a lower bound when an item's size is.
+    /// none of its items was, a lower bound when an item's size is or an item is missing.
     public var onDiskMeasure: Measure {
         if hostSizeUnknown == true { return .unknown }
         guard hostBytes == nil else { return .bytes(onDisk) }
         if !items.isEmpty, items.allSatisfy({ $0.onDisk.bytes == nil }) { return .notMeasured }
-        let partial = items.contains { if case .atLeast = $0.onDisk { true } else { false } }
+        let partial = isMissingParts || items.contains { if case .atLeast = $0.onDisk { true } else { false } }
         return partial ? .atLeast(onDisk) : .bytes(onDisk)
     }
+}
+
+extension ItemKind {
+    /// Space already counted in another item of the same owner (Nix's old generations are
+    /// part of its live store), so not measuring it leaves nothing out of the total.
+    public var isCountedInAnotherItem: Bool { self == .nixOldGenerations }
 }

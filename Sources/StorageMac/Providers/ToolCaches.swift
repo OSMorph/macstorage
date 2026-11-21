@@ -27,17 +27,18 @@ public struct NixProvider: Provider {
         let sized = unsized == 0
         let generations = ((try? FileManager.default.contentsOfDirectory(atPath: "/nix/var/nix/profiles")) ?? [])
             .filter { $0.hasPrefix("system-") && $0.hasSuffix("-link") }.count
-        let total = SystemProvider.volumeUsed("/nix") ?? 0
+        let volume = SystemProvider.volumeUsed("/nix")
         let facts = [
             Fact(.nixDeadPaths, onDisk: sized ? .bytes(deadBytes) : .atLeast(deadBytes), targets: paths.map { Target($0) }, path: "/nix/store", counts: ["paths": paths.count]),
             Fact(.nixOldGenerations, onDisk: .notMeasured, reclaimable: .notMeasured, counts: ["generations": max(0, generations - 1)]),
-            Fact(.nixLive, onDisk: sized ? .bytes(max(0, total - deadBytes)) : .notMeasured),
+            Fact(.nixLive, onDisk: sized ? volume.map { .bytes(max(0, $0 - deadBytes)) } ?? .notMeasured : .notMeasured),
         ]
         return ProviderResult(owners: [Owner(id: "nix", name: "Nix store", kind: .developerTools, location: "/nix (its own APFS volume)",
                                              isOwnVolume: true, items: facts.map(Rules.item))],
-                              coverage: [CoverageEntry(area: area, status: sized ? .measured : .failed,
-                                                       detail: sized ? "\(plural(paths.count, "dead path")) sized; old generations not measured yet."
-                                                           : "\(plural(paths.count, "dead path")) found, but Nix couldn't size \(unsized) of them, so the dead total is a lower bound.")])
+                              coverage: [CoverageEntry(area: area, status: sized && volume != nil ? .measured : .failed,
+                                                       detail: !sized ? "\(plural(paths.count, "dead path")) found, but Nix couldn't size \(unsized) of them, so the dead total is a lower bound."
+                                                           : volume == nil ? "\(plural(paths.count, "dead path")) sized; the /nix volume's size couldn't be read, so the rest of the store isn't measured."
+                                                           : "\(plural(paths.count, "dead path")) sized; old generations not measured yet.")])
     }
 }
 

@@ -94,17 +94,30 @@ public struct Accounting: Sendable {
         snapshot.owners.reduce(into: [:]) { $0[$1.kind, default: 0] += $1.hostOnDisk }
     }
 
+    /// The "Not attributed yet" figure: space on the Data volume no owner accounts for, or,
+    /// when the Data volume wasn't measured, all used space no owner accounts for.
+    public var unattributedOnDisk: Int64 {
+        unattributedOnDisk(accounted: onDiskByKind.values.reduce(0, +))
+    }
+
+    private func unattributedOnDisk(accounted: Int64) -> Int64 {
+        snapshot.unattributed ?? max(0, snapshot.disk.used - accounted)
+    }
+
     /// The disk bar: owners by kind, then what no owner accounts for, then free space.
     /// Together they add up to the disk's capacity (unless owners overlap, which the
     /// accounting avoids).
     public var diskSegments: [DiskSegment] {
         let byKind = onDiskByKind
         var segments = OwnerKind.allCases.map { DiskSegment(id: $0.rawValue, label: $0.label, kind: $0, bytes: byKind[$0, default: 0]) }
-        segments.append(DiskSegment(id: "unattributed", label: "Not attributed yet", bytes: snapshot.unattributed))
-        // Space used outside the Data volume that no owner accounts for: local snapshots,
-        // Recovery, other volumes.
         let accounted = segments.map(\.bytes).reduce(0, +)
-        segments.append(DiskSegment(id: "other", label: "Snapshots and other volumes", bytes: max(0, snapshot.disk.used - accounted)))
+        let unattributed = unattributedOnDisk(accounted: accounted)
+        segments.append(DiskSegment(id: "unattributed", label: "Not attributed yet", bytes: unattributed))
+        // Space used outside the Data volume that no owner accounts for: local snapshots,
+        // Recovery, other volumes. Without the Data volume's size, it's all unattributed.
+        if snapshot.unattributed != nil {
+            segments.append(DiskSegment(id: "other", label: "Snapshots and other volumes", bytes: max(0, snapshot.disk.used - accounted - unattributed)))
+        }
         segments.append(DiskSegment(id: "free", label: "Free", bytes: snapshot.disk.free))
         return segments
     }

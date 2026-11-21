@@ -126,27 +126,60 @@ final class AccountingTests: XCTestCase {
         s.owners[i] = Owner(id: "docker", name: docker.name, kind: docker.kind, location: "", hostSizeUnknown: true, items: docker.items)
         XCTAssertEqual(s.owners[i].hostOnDisk, 0)
         XCTAssertEqual(s.owners[i].onDiskMeasure, .unknown)
-        XCTAssertGreaterThan(s.unattributed, before, "its space is unattributed, not guessed from what's inside the VM")
+        XCTAssertGreaterThan(s.unattributed!, before!, "its space is unattributed, not guessed from what's inside the VM")
         XCTAssertEqual(Accounting(s).diskSegments.map(\.bytes).reduce(0, +), s.disk.total)
     }
 
-    func testImpossibleSizesBecomeNotMeasured() {
-        // A saved 0.1.0 scan: every macOS volume read as the container's used space, 4 × 663 GB.
+    /// A scan saved by 0.1.0 (no format): every macOS volume, the Nix volume and the Data
+    /// volume were read as the APFS container's used space.
+    static func legacyScan() throws -> Snapshot {
         var s = Demo.snapshot()
         let used = s.disk.used
         let macos = s.owners.firstIndex { $0.id == "macos" }!
         s.owners[macos].items = (0..<4).map { var item = s.owners[macos].items[0]; item.id += "\($0)"; item.onDisk = .bytes(used); return item }
-        s.owners[macos].items[0].onDisk = .bytes(used + 1)
-        s.disk.dataVolumeUsed = used + 5
-        let docker = s.owners.firstIndex { $0.id == "docker" }!
-        s.owners[docker].items[0].onDisk = .bytes(used + 1)
-        let fixed = s.removingImpossibleSizes()
-        XCTAssertEqual(fixed.owners[macos].items[0].onDisk, .notMeasured)
-        XCTAssertEqual(fixed.owners[macos].items[1].onDisk, .bytes(used), "a size up to the used space can't be ruled out on its own")
-        XCTAssertEqual(fixed.disk.dataVolumeUsed, used)
-        XCTAssertEqual(fixed.owners[docker].items[0].onDisk, .bytes(used + 1), "sizes inside a VM aren't the Mac's")
+        let nix = s.owners.firstIndex { $0.id == "nix" }!
+        let live = s.owners[nix].items.firstIndex { $0.kind == .nixLive }!
+        s.owners[nix].items[live].onDisk = .bytes(used - Demo.gb(16.7))
+        s.disk.dataVolumeUsed = used
+        // Saved without the format key, as 0.1.0 wrote it.
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(s)) as! [String: Any]
+        json["format"] = nil
+        return try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: json))
+    }
+
+    func testAScanSavedBy010ForgetsItsVolumeSizes() throws {
+        let legacy = try Self.legacyScan()
+        XCTAssertNil(legacy.format)
+        let s = legacy.migrated()
+        XCTAssertEqual(s.format, Snapshot.currentFormat)
+        XCTAssertEqual(s.owner("macos")?.onDiskMeasure, .notMeasured, "not 2.7 TB")
+        XCTAssertEqual(s.owner("nix")?.items.first { $0.kind == .nixLive }?.onDisk, .notMeasured)
+        XCTAssertEqual(s.owner("nix")?.onDiskMeasure, .atLeast(Demo.gb(16.7)), "the dead paths Nix sized itself stand")
+        XCTAssertEqual(s.owner("go")?.onDisk, legacy.owner("go")?.onDisk, "other sizes stand")
+        XCTAssertNil(s.disk.dataVolumeUsed)
+        XCTAssertEqual(s.coverage.first { $0.area == "Volumes" }?.status, .notMeasured)
+        // Everything no owner accounts for is one "Not attributed yet" segment.
+        let acc = Accounting(s)
+        XCTAssertNil(acc.diskSegments.first { $0.id == "other" })
+        XCTAssertEqual(acc.unattributedOnDisk, s.disk.used - acc.onDiskByKind.values.reduce(0, +))
+        XCTAssertEqual(acc.diskSegments.map(\.bytes).reduce(0, +), s.disk.total)
+        XCTAssertLessThanOrEqual(acc.onDiskByKind.values.reduce(0, +), s.disk.used)
         let demo = Demo.snapshot()
-        XCTAssertEqual(demo.removingImpossibleSizes(), demo)
+        XCTAssertEqual(demo.migrated(), demo, "a current scan is left as it is")
+    }
+
+    func testAMissingVolumeMakesTheTotalALowerBound() {
+        var s = Demo.snapshot()
+        let i = s.owners.firstIndex { $0.id == "macos" }!
+        var preboot = s.owners[i].items[0]
+        preboot.id += "-preboot"
+        preboot.onDisk = .notMeasured
+        s.owners[i].items.append(preboot)
+        XCTAssertTrue(s.owners[i].isMissingParts)
+        XCTAssertEqual(s.owners[i].onDiskMeasure, .atLeast(Demo.gb(50.5)))
+        XCTAssertNil(ScanSummary(s).size("macos"), "an incomplete total isn't compared in History")
+        XCTAssertFalse(s.owner("nix")!.isMissingParts, "Nix's old generations are counted in its live store")
+        XCTAssertNotNil(ScanSummary(s).size("nix"))
     }
 
     func testAnOwnerWithNothingMeasuredShowsNotMeasured() {
@@ -154,7 +187,7 @@ final class AccountingTests: XCTestCase {
         let i = s.owners.firstIndex { $0.id == "macos" }!
         s.owners[i].items[0].onDisk = .notMeasured
         XCTAssertEqual(s.owners[i].onDiskMeasure, .notMeasured)
-        XCTAssertEqual(s.owners.first { $0.id == "nix" }?.onDiskMeasure, .bytes(Demo.gb(16.7) + Demo.gb(98)), "one unmeasured item among measured ones")
+        XCTAssertEqual(s.owners.first { $0.id == "nix" }?.onDiskMeasure, .bytes(Demo.gb(16.7) + Demo.gb(98)), "an unmeasured item already counted in another")
         XCTAssertEqual(Accounting(s).diskSegments.map(\.bytes).reduce(0, +), s.disk.total)
     }
 
@@ -166,7 +199,7 @@ final class AccountingTests: XCTestCase {
 
     func testUnattributedExcludesOwnVolumes() {
         let onData = snapshot.owners.filter { !$0.isOwnVolume }.map(\.onDisk).reduce(0, +)
-        XCTAssertEqual(snapshot.unattributed, snapshot.disk.dataVolumeUsed - onData)
+        XCTAssertEqual(snapshot.unattributed, snapshot.disk.dataVolumeUsed! - onData)
     }
 }
 
@@ -386,13 +419,16 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(h.scans[1].size("docker"), nil)
     }
 
-    func testASizeLargerThanTheUsedSpaceIsAGap() {
-        // Version 0.1.0 recorded each macOS volume as the whole container (2.7 TB on a 1 TB disk).
+    func testVolumeSizesRecordedBy010AreGaps() {
+        // Version 0.1.0 recorded the macOS and Nix volumes as the whole container.
         let day: TimeInterval = 86_400
-        let old = ScanSummary(date: Date(timeIntervalSince1970: 0), used: 663, free: 332, owners: ["macos": 2_650, "go": 10], names: [:])
-        let new = ScanSummary(date: Date(timeIntervalSince1970: day), used: 665, free: 330, owners: ["macos": 30, "go": 12], names: [:])
+        var old = ScanSummary(date: Date(timeIntervalSince1970: 0), used: 663, free: 332, owners: ["macos": 2_652, "nix": 663, "go": 10], names: [:])
+        old.format = nil
+        let new = ScanSummary(date: Date(timeIntervalSince1970: day), used: 665, free: 330, owners: ["macos": 30, "nix": 90, "go": 12], names: [:])
         XCTAssertNil(old.size("macos"))
+        XCTAssertNil(old.size("nix"))
         XCTAssertEqual(old.size("go"), 10)
+        XCTAssertEqual(new.size("macos"), 30)
         let changes = History(scans: [old, new]).changes(from: 0, to: 1)
         XCTAssertEqual(changes.map(\.ownerID), ["go"], "no 'macOS shrank 2.6 TB'")
     }

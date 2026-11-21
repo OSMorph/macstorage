@@ -15,7 +15,7 @@ public struct SystemProvider: Provider {
         let total = Int64(v?.volumeTotalCapacity ?? 0), free = Int64(v?.volumeAvailableCapacity ?? 0)
         let important = v?.volumeAvailableCapacityForImportantUsage ?? free
         return DiskUsage(total: total, free: free, purgeable: max(0, important - free),
-                         dataVolumeUsed: min(volumeUsed("/System/Volumes/Data") ?? 0, total - free))
+                         dataVolumeUsed: volumeUsed(dataVolume).map { min($0, total - free) })
     }
 
     /// True when a volume is mounted at `path` (not just a folder on the volume above it).
@@ -46,13 +46,14 @@ public struct SystemProvider: Provider {
         }
     }
 
+    static let dataVolume = "/System/Volumes/Data"
     static let volumes = ["/": "System volume", "/System/Volumes/Preboot": "Preboot", "/System/Volumes/VM": "Swap and sleep image", "/System/Volumes/Update": "Staged updates"]
 
     public func scan(_ ctx: ScanContext) async -> ProviderResult {
         // A volume that's mounted but can't be measured stays listed, as not measured.
         let mounted = Self.volumes.sorted { $0.key < $1.key }.filter { Self.isMountPoint($0.key) }
         let facts = mounted.map { path, name in Fact(.macOSVolume, key: name, name: name, onDisk: Self.volumeUsed(path).map(Measure.bytes) ?? .notMeasured) }
-        let failed = facts.filter { $0.onDisk.bytes == nil }.compactMap(\.name)
+        let failed = facts.filter { $0.onDisk.bytes == nil }.compactMap(\.name) + (Self.volumeUsed(Self.dataVolume) == nil ? ["Data volume"] : [])
         var owners = [Owner(id: "macos", name: "macOS", kind: .system, location: "System, Preboot, VM and Update volumes", isOwnVolume: true, items: facts.map(Rules.item))]
         let clt = "/Library/Developer/CommandLineTools"
         if ctx.exists(clt) {

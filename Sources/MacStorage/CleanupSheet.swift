@@ -23,7 +23,7 @@ struct Totals: View {
 
     /// Before a run: what each destination is expected to get back.
     init(plan: CleanupPlan) {
-        values = Destination.allCases.map { (formatBytes(plan.expected($0), upperBound: plan.isUpperBound($0)), $0.label, nil) }
+        values = Destination.allCases.map { (plan.expectedText($0), $0.label, nil) }
     }
 
     init(_ values: [(value: String, caption: String, detail: String?)]) { self.values = values }
@@ -100,7 +100,7 @@ struct StepPreview: View {
             HStack {
                 Text("\(step.ownerName) · \(step.item.name)")
                 Spacer()
-                Text(formatBytes(step.expectedBytes, upperBound: step.item.reclaimableIsUpperBound)).fontWeight(.semibold).monospacedDigit()
+                Text(step.expectedText).fontWeight(.semibold).monospacedDigit()
             }
             Text(commandLine).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
                 .padding(6).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
@@ -159,7 +159,7 @@ struct RunningPhase: View {
                     case .skipped(let why)?: Text(why).font(.caption).foregroundStyle(Color.warningText).lineLimit(2)
                     case let o? where o.didRun: Text(o.measured.map(formatBytes) ?? "≈ \(formatBytes(step.expectedBytes))").monospacedDigit().foregroundStyle(.secondary)
                     case .failed?: Text("failed").foregroundStyle(Color.errorText)
-                    default: Text(formatBytes(step.expectedBytes, upperBound: step.item.reclaimableIsUpperBound)).monospacedDigit().foregroundStyle(.tertiary)
+                    default: Text(step.expectedText).monospacedDigit().foregroundStyle(.tertiary)
                     }
                 }
             }
@@ -237,7 +237,7 @@ struct ResultsPhase: View {
                     switch r.outcome {
                     case .skipped(let why):
                         HStack {
-                            Text(why + " It's unticked until you scan again.").font(.caption).foregroundStyle(Color.warningText)
+                            Text(why + skipAdvice(r.step)).font(.caption).foregroundStyle(Color.warningText)
                             if case .clearFolder = r.step.item.action {
                                 RefreshButton(model: model, itemID: r.step.item.id)
                             } else {
@@ -297,7 +297,7 @@ struct ResultsPhase: View {
     private func totals(_ inTrash: [TrashEntry]) -> [(value: String, caption: String, detail: String?)] {
         func detail(_ d: Destination) -> String? {
             let predicted = run.predicted(d)
-            return predicted > 0 ? "predicted \(formatBytes(predicted, upperBound: run.predictionIsUpperBound(d))) for the steps that ran" : nil
+            return predicted > 0 ? "predicted \(run.predictedText(d)) for the steps that ran" : nil
         }
         let inTrashBytes = inTrash.map(\.bytes).reduce(0, +)
         return [
@@ -351,6 +351,15 @@ struct ResultsPhase: View {
         }
     }
 
+    /// What happens to a skipped step next, by why it was skipped.
+    private func skipAdvice(_ step: CleanupStep) -> String {
+        switch step.item.action {
+        case .clearFolder: " List it again to review what's there now."
+        case .moveToTrash, .pickToTrash: " It stays ticked; run cleanup again when that's resolved."
+        default: " It's unticked until you scan again."
+        }
+    }
+
     private var summary: String {
         let skipped = run.steps.filter { if case .skipped = $0.outcome { true } else { false } }.count
         let notRun = run.steps.filter { if case .notRun = $0.outcome { true } else { false } }.count
@@ -361,7 +370,7 @@ struct ResultsPhase: View {
 
     /// "16.2 GB measured · predicted 16.7 GB", or the prediction alone when it couldn't be measured.
     private func outcomeText(_ r: RunRecord.StepResult) -> String {
-        let predicted = formatBytes(r.step.expectedBytes, upperBound: r.step.item.reclaimableIsUpperBound)
+        let predicted = r.step.expectedText
         switch r.outcome {
         case .done(let m), .partial(let m, _): return m.map { "\(formatBytes($0)) measured · predicted \(predicted)" } ?? "\(predicted) predicted, not re-measured"
         case .skipped: return "skipped"
@@ -379,8 +388,7 @@ struct ResultsPhase: View {
 /// zero: "Not re-measured" when nothing could be measured, "≥ X" when only part could.
 func freedText(_ run: RunRecord, _ d: Destination) -> String {
     let measured = d == .mac ? run.freedOnMac : run.freed(d)
-    let unmeasured = run.unmeasured(d)
-    guard unmeasured > 0 else { return formatBytes(measured) }
+    guard run.unmeasuredCount(d) > 0 else { return formatBytes(measured) }
     return measured == 0 ? "Not re-measured" : "≥ " + formatBytes(measured)
 }
 

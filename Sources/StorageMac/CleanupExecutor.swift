@@ -69,7 +69,7 @@ public struct CleanupExecutor: Sendable {
             let result = await perform(step, previewTime: plan.previewTime)
             results.append(result)
             progress(i, result.outcome)
-            if result.outcome.stopsRun { haltReason = "Not started because an earlier step failed." }
+            if result.outcome.stopsRun { haltReason = "Not started because an earlier step failed or only partly succeeded." }
         }
         return RunRecord(id: id, started: started, finished: Date(), steps: results)
     }

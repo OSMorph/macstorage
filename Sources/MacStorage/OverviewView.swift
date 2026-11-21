@@ -123,12 +123,15 @@ struct TierTile: View {
         let order = Destination.allCases.sorted { r[$0] > r[$1] }
         let phrase: [Destination: String] = [.mac: "right away", .trash: "after emptying the Trash", .containerDisk: "inside Docker's disk"]
         let bound = { (d: Destination) in r.boundPrefix(d) + formatBytes(r[d]) }
-        Tile(title: { TierBadge(tier: tier) }, value: bound(order[0]), unit: phrase[order[0]]!,
-             secondary: "+ \(bound(order[1])) \(phrase[order[1]]!)",
-             note: "+ \(bound(order[2])) \(phrase[order[2]]!)."
-                + (userRun > 0 ? " \(plural(userRun, "item")) you run yourself." : "")
-                + (unmeasured > 0 ? " \(unmeasured) not measured yet." : ""),
-             link: action.map { ("Review cleanup", $0) })
+        let extras = (userRun > 0 ? " \(plural(userRun, "item")) you run yourself." : "") + (unmeasured > 0 ? " \(unmeasured) not measured yet." : "")
+        if r.byDestination.values.allSatisfy({ $0 == 0 }) {
+            Tile(title: { TierBadge(tier: tier) }, value: "Nothing", unit: "for the app to clean", note: "No item in this tier is left for a cleanup." + extras)
+        } else {
+            Tile(title: { TierBadge(tier: tier) }, value: bound(order[0]), unit: phrase[order[0]]!,
+                 secondary: r[order[1]] > 0 ? "+ \(bound(order[1])) \(phrase[order[1]]!)" : nil,
+                 note: (r[order[2]] > 0 ? "+ \(bound(order[2])) \(phrase[order[2]]!)." : "") + extras,
+                 link: action.map { ("Review cleanup", $0) })
+        }
     }
 }
 
@@ -159,7 +162,7 @@ struct OwnerRanking: View {
             }
             TableColumn("Reclaimable") { o in ReclaimableText(label: accounting.reclaimableLabel(owner: o)) }.width(170)
         }
-        .frame(height: CGFloat(top.count) * 24 + 30)
+        .frame(height: CGFloat(top.count) * 26 + 32)
         .contextMenu(forSelectionType: Owner.ID.self) { _ in } primaryAction: { ids in
             if let id = ids.first { model.show(owner: id) }
         }

@@ -252,7 +252,7 @@ struct CleanupView: View {
                                         }
                                         Spacer()
                                         if model.cleanupState.partlyCleaned[item.id] != nil {
-                                            Text("partly cleaned today").font(.caption).foregroundStyle(.secondary)
+                                            Text("partly cleaned since this scan").font(.caption).foregroundStyle(.secondary)
                                         }
                                         Text(item.action.destination?.label ?? "").font(.caption).foregroundStyle(.secondary)
                                         HStack(spacing: 2) { if item.reclaimableIsUpperBound { Text("≤") }; MeasureText(measure: item.reclaimable) }
@@ -289,7 +289,7 @@ struct CleanupView: View {
                 }
                 Divider()
                 HStack {
-                    Text("\(plural(plan.steps.count, "step")) · \(formatBytes(plan.expected(.mac), upperBound: plan.isUpperBound(.mac))) right away, \(formatBytes(plan.expected(.trash), upperBound: plan.isUpperBound(.trash))) after emptying the Trash, \(formatBytes(plan.expected(.containerDisk), upperBound: plan.isUpperBound(.containerDisk))) inside Docker's disk")
+                    Text("\(plural(plan.steps.count, "step")) · \(plan.expectedText(.mac)) right away, \(plan.expectedText(.trash)) after emptying the Trash, \(plan.expectedText(.containerDisk)) inside Docker's disk")
                         .foregroundStyle(.secondary)
                     Spacer()
                     if let why = model.cleanupBlocked {

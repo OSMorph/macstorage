@@ -109,8 +109,8 @@ struct StatusStrips: View {
                 }
                 .padding(8).background(.yellow.opacity(0.15))
             }
-            if !model.cleaned.isEmpty || !model.cleanupState.partlyCleaned.isEmpty {
-                strip("Sizes are from the scan before today's cleanup. Completed steps have left Cleanup; By owner keeps their scan-time sizes, marked “Cleaned today”. Scan again to re-measure.", .blue)
+            if model.snapshot != nil, !model.cleaned.isEmpty || !model.cleanupState.partlyCleaned.isEmpty {
+                strip("Sizes are from the scan before the cleanups since. Completed steps have left Cleanup; By owner keeps their scan-time sizes, marked “Cleaned since this scan”. Scan again to re-measure.", .blue)
             }
             if !model.fullDiskAccess, !model.demo {
                 HStack {

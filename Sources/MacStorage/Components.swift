@@ -63,8 +63,6 @@ extension Color {
     })
 }
 
-/// "≤ 7.5 GB" for an upper bound, "7.5 GB" otherwise.
-func formatBytes(_ b: Int64, upperBound: Bool) -> String { (upperBound && b > 0 ? "≤ " : "") + formatBytes(b) }
 
 func formatBytes(_ b: Int64) -> String { ByteFormat.string(b) }
 
@@ -116,7 +114,7 @@ struct ReclaimableText: View {
                 }
             }
         case .unknown: Text("Unknown").foregroundStyle(.secondary)
-        case .cleaned: Text("Cleaned today").foregroundStyle(.secondary)
+        case .cleaned: Text("Cleaned since this scan").foregroundStyle(.secondary)
         case .none: Text("0 bytes").foregroundStyle(.secondary)
         }
     }

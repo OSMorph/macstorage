@@ -86,9 +86,9 @@ struct ItemTable: View {
             TableColumn("On disk") { i in MeasureText(measure: i.onDisk) }.width(100)
             TableColumn("Reclaimable") { i in
                 if accounting.cleaned.contains(i.id) {
-                    Text("Cleaned today").foregroundStyle(.secondary)
+                    Text("Cleaned since this scan").foregroundStyle(.secondary)
                 } else if model.cleanupState.partlyCleaned[i.id] != nil {
-                    Text("Partly cleaned today").foregroundStyle(.secondary)
+                    Text("Partly cleaned since this scan").foregroundStyle(.secondary)
                 } else if i.tier == .leaveAlone || i.tier == .notRemovable {
                     Text("0 bytes").foregroundStyle(.secondary)
                 } else {
@@ -127,7 +127,9 @@ struct Inspector: View {
                     Text("All owners").font(.title3.weight(.semibold))
                     Text("\(plural(snapshot.owners.count, "owner")) · \(formatBytes(snapshot.owners.map(\.onDisk).reduce(0, +))) attributed").foregroundStyle(.secondary)
                     Callout("Pick an owner in the map or the list (Return opens it) to see what it's made of, the recommendation, and the exact command or action.")
-                    Callout("\(formatBytes(snapshot.unattributed)) not attributed yet: space on the Data volume no owner accounts for, mostly because this scan didn't look outside your home folder.") {
+                    Callout(snapshot.isPartial
+                            ? "\(formatBytes(snapshot.unattributed)) not scanned or attributed yet: this scan stopped before \(snapshot.unfinishedAreas.joined(separator: ", ")) finished, and it doesn't look outside your home folder."
+                            : "\(formatBytes(snapshot.unattributed)) not attributed yet: space on the Data volume no owner accounts for, mostly because this scan didn't look outside your home folder.") {
                         Button("See scan coverage") { model.section = .coverage }.buttonStyle(.link)
                     }
                 }
@@ -143,12 +145,12 @@ struct Inspector: View {
         Text(item.name).font(.title3.weight(.semibold))
         Text("\(owner.name) · \(owner.kind.label)").foregroundStyle(.secondary)
         if let runID = model.cleaned[item.id] {
-            Callout("Cleaned today. The on-disk size shown is from the scan before the cleanup; scan again to re-measure.") {
+            Callout("Cleaned since this scan. The on-disk size shown is from the scan before the cleanup; scan again to re-measure.") {
                 Button("View its receipt") { model.section = .history; model.openRunID = runID }.buttonStyle(.link)
             }
         } else {
             if let runID = model.cleanupState.partlyCleaned[item.id] {
-                Callout("Partly cleaned today: some of the list was removed, and the rest was left alone or stopped by a problem (the receipt says which). Sizes are from before; scan again for a current list.") {
+                Callout("Partly cleaned since this scan: some of the list was removed, and the rest was left alone or stopped by a problem (the receipt says which). Sizes are from before; scan again for a current list.") {
                     Button("View its receipt") { model.section = .history; model.openRunID = runID }.buttonStyle(.link)
                 }
             }

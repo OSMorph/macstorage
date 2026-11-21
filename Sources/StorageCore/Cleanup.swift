@@ -11,6 +11,17 @@ public struct CleanupStep: Codable, Equatable, Identifiable, Sendable {
 
     public var id: String { item.id }
 
+    /// "≤ " when the expected figure is an upper bound, "≥ " when it's a lower bound.
+    public var boundPrefix: String {
+        guard expectedBytes > 0 else { return "" }
+        if item.reclaimableIsUpperBound { return "≤ " }
+        if case .atLeast = item.reclaimable, item.action != .pickToTrash { return "≥ " }
+        return ""
+    }
+
+    /// The expected figure with its bound: "≤ 7.5 GB".
+    public var expectedText: String { boundPrefix + ByteFormat.string(expectedBytes) }
+
     public init(item: Item, ownerName: String, approvedTargets: [Target], expectedBytes: Int64, destination: Destination) {
         self.item = item
         self.ownerName = ownerName
@@ -54,9 +65,12 @@ public struct CleanupPlan: Codable, Equatable, Sendable {
         steps.filter { $0.destination == d }.map(\.expectedBytes).reduce(0, +)
     }
 
-    /// True when part of a destination's expected figure is an upper bound ("at most").
-    public func isUpperBound(_ d: Destination) -> Bool {
-        steps.contains { $0.destination == d && $0.item.reclaimableIsUpperBound }
+    /// A destination's expected total with its bound: "≤" if any part is an upper bound,
+    /// otherwise "≥" if any part is a lower bound.
+    public func expectedText(_ d: Destination) -> String {
+        let prefixes = Set(steps.filter { $0.destination == d }.map(\.boundPrefix))
+        let prefix = prefixes.contains("≤ ") ? "≤ " : prefixes.contains("≥ ") ? "≥ " : ""
+        return (expected(d) > 0 ? prefix : "") + ByteFormat.string(expected(d))
     }
 
     /// Steps holding files the user picked themselves. They need an extra confirmation.
@@ -210,9 +224,16 @@ public struct RunRecord: Codable, Equatable, Identifiable, Sendable {
         steps.filter { $0.step.destination == d && $0.outcome.didRun && $0.outcome.measured == nil }.map(\.step.expectedBytes).reduce(0, +)
     }
 
-    /// True when part of a destination's prediction was an upper bound.
-    public func predictionIsUpperBound(_ d: Destination) -> Bool {
-        steps.contains { $0.step.destination == d && $0.outcome.didRun && $0.step.item.reclaimableIsUpperBound }
+    /// Steps in a destination that ran but couldn't be re-measured.
+    public func unmeasuredCount(_ d: Destination) -> Int {
+        steps.filter { $0.step.destination == d && $0.outcome.didRun && $0.outcome.measured == nil }.count
+    }
+
+    /// What the preview predicted for the steps that ran, with its bound ("≤ 21.5 GB").
+    public func predictedText(_ d: Destination) -> String {
+        let ran = steps.filter { $0.step.destination == d && $0.outcome.didRun }.map(\.step)
+        let prefixes = Set(ran.map(\.boundPrefix))
+        return (prefixes.contains("≤ ") ? "≤ " : prefixes.contains("≥ ") ? "≥ " : "") + ByteFormat.string(predicted(d))
     }
 
     /// What the preview predicted for the steps that ran, per destination.
@@ -256,9 +277,9 @@ public enum Receipt {
         for r in run.steps {
             let s = r.step, title = "\(s.ownerName) · \(s.item.name)"
             let freed = { (m: Int64?) in m.map { "\(ByteFormat.string($0)) \(s.destination == .trash ? "moved to the Trash" : s.destination == .containerDisk ? "freed inside Docker's disk" : "freed"), measured" + (s.item.kind.measurementNote.map { " " + $0 } ?? "") }
-                ?? "predicted \(ByteFormat.string(s.expectedBytes)), not re-measured" }
+                ?? "predicted \(s.expectedText), not re-measured" }
             switch r.outcome {
-            case .done(let m): lines.append("DONE · \(title) · \(freed(m))" + (m == nil ? "" : " (predicted \(ByteFormat.string(s.expectedBytes)))"))
+            case .done(let m): lines.append("DONE · \(title) · \(freed(m))" + (m == nil ? "" : " (predicted \(s.expectedText))"))
             case .partial(let m, let problems): lines.append("PARTLY DONE · \(title) · \(freed(m))"); lines += problems.map { "  Problem: \($0)" }
             case .skipped(let why): lines.append("SKIPPED · \(title) · \(why) Nothing was removed.")
             case .notRun(let why): lines.append("NOT RUN · \(title) · \(why)")
@@ -318,7 +339,12 @@ public struct CleanupState: Equatable, Sendable {
 
     public mutating func record(_ r: RunRecord.StepResult, run: UUID) {
         let id = r.step.item.id
-        if case .skipped = r.outcome { skipped.insert(id); return }
+        // A changed list stays unticked until a new scan. Trash steps skip for reasons that
+        // pass (a running app), so they stay ticked.
+        if case .skipped = r.outcome {
+            if r.step.destination != .trash { skipped.insert(id) }
+            return
+        }
         guard r.outcome.didRun else { return }
         if r.step.item.action == .pickToTrash {
             removedPicks[id, default: []].formUnion(r.trashed.map(\.original))

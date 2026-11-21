@@ -103,7 +103,7 @@ public struct PodmanProvider: Provider {
                                        hostBytes: onMac, hostSizeUnknown: disk == nil, items: facts.map(Rules.item)))
             result.coverage.append(problems.isEmpty
                 ? CoverageEntry(area: title, status: .measured, detail: "Running; measured through \(askedNames.joined(separator: " and ")).")
-                : CoverageEntry(area: title, status: .failed, detail: "Running, but \(problems.joined(separator: "; ")). What those would have listed isn't shown."))
+                : CoverageEntry(area: title, status: .failed, detail: "Running, but \(problems.joined(separator: "; "))."))
         }
         return result
     }
@@ -132,7 +132,7 @@ public struct PodmanProvider: Provider {
             facts.append(Fact(.podmanUnusedImages, key: connection, name: "Images no container uses" + label, onDisk: size("Images"),
                               reclaimable: .bytes(reclaimable), targets: DockerProvider.imageRefs(unused, size: { Int64($0) }), root: connection,
                               counts: ["unused": unique.count, "total": Set(images.compactMap { $0["Id"] }).count]))
-        } else { problems.append("podman images didn't answer through \(connection)") }
+        } else { problems.append("podman images didn't answer through \(connection), so its images aren't shown") }
         if let listing = await ctx.output("podman", c + ["ps", "--all", "--format", "{{.Names}}\t{{.State}}\t{{.IsInfra}}"]) {
             let rows = listing.split(whereSeparator: \.isNewline).map { $0.split(separator: "\t").map(String.init) }.filter { $0.count >= 2 }
             // Stopped ones only: not running or paused, and not a pod's infra container
@@ -141,12 +141,12 @@ public struct PodmanProvider: Provider {
             let stopped = containers.filter { ["exited", "created", "stopped", "configured"].contains($0[1]) }.map { Target($0[0]) }
             facts.append(Fact(.podmanStoppedContainers, key: connection, name: "Stopped containers" + label, onDisk: size("Containers"),
                               targets: stopped, root: connection, counts: ["stopped": stopped.count, "total": containers.count]))
-        } else { problems.append("podman ps didn't answer through \(connection)") }
+        } else { problems.append("podman ps didn't answer through \(connection), so its containers aren't shown") }
         if let listing = await ctx.output("podman", c + ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}"]) {
             let volumes = listing.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { Target($0) }
             facts.append(Fact(.podmanUnusedVolumes, key: connection, name: "Volumes no container uses" + label, onDisk: size("Local Volumes"),
                               targets: volumes, root: connection, counts: ["unused": volumes.count, "total": usage["Local Volumes"]?.total ?? volumes.count]))
-        } else { problems.append("podman volume ls didn't answer through \(connection)") }
+        } else { problems.append("podman volume ls didn't answer through \(connection), so its volumes aren't shown") }
         // Every command is checked against this connection right before it runs.
         for i in facts.indices { facts[i].scopeGuard = .podmanConnection(uri: uri, machine: machine) }
         // Without every row, the store's total isn't known.

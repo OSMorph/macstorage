@@ -113,10 +113,12 @@ public struct Accounting: Sendable {
         let accounted = segments.map(\.bytes).reduce(0, +)
         let unattributed = unattributedOnDisk(accounted: accounted)
         segments.append(DiskSegment(id: "unattributed", label: "Not attributed yet", bytes: unattributed))
-        // Space used outside the Data volume that no owner accounts for: local snapshots,
-        // Recovery, other volumes. Without the Data volume's size, it's all unattributed.
+        // Space used outside the Data volume that no owner accounts for: Recovery, other
+        // volumes, the container's own reserve. (APFS charges a local snapshot to its volume,
+        // so the Data volume's snapshots are in its used space.) Without the Data volume's
+        // size, it's all unattributed.
         if snapshot.unattributed != nil {
-            segments.append(DiskSegment(id: "other", label: "Snapshots and other volumes", bytes: max(0, snapshot.disk.used - accounted - unattributed)))
+            segments.append(DiskSegment(id: "other", label: "Other volumes", bytes: max(0, snapshot.disk.used - accounted - unattributed)))
         }
         segments.append(DiskSegment(id: "free", label: "Free", bytes: snapshot.disk.free))
         return segments

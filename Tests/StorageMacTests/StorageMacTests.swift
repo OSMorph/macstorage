@@ -476,7 +476,8 @@ final class VolumeTests: XCTestCase {
         let disk = SystemProvider.diskUsage()
         let data = try XCTUnwrap(SystemProvider.volumeUsed("/System/Volumes/Data"))
         XCTAssertGreaterThan(data, 0)
-        XCTAssertEqual(disk.dataVolumeUsed, min(data, disk.used))
+        // Measured moments apart: allow for files the runner writes in between.
+        XCTAssertEqual(Double(try XCTUnwrap(disk.dataVolumeUsed)), Double(min(data, disk.used)), accuracy: 1e9)
         let result = await SystemProvider().scan(ScanContext(tools: FakeTools(), home: NSTemporaryDirectory(), fullDiskAccess: true))
         let macos = try XCTUnwrap(result.owners.first { $0.id == "macos" })
         XCTAssertEqual(result.coverage.first?.status, .measured, result.coverage.first?.detail ?? "")

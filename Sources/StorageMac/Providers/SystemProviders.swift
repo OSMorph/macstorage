@@ -40,9 +40,11 @@ public struct SystemProvider: Provider {
         // The reply: its length, the attributes returned (five groups: common, volume, dir,
         // file, fork), then the space used. The volume can decline to return it.
         return buffer.withUnsafeBytes { raw -> Int64? in
+            let offset = 4 + MemoryLayout<attribute_set_t>.size
+            guard raw.loadUnaligned(as: UInt32.self) >= offset + 8 else { return nil }
             let returned = raw.loadUnaligned(fromByteOffset: 8, as: attrgroup_t.self)
             guard returned & attrgroup_t(ATTR_VOL_SPACEUSED) != 0 else { return nil }
-            return raw.loadUnaligned(fromByteOffset: 4 + MemoryLayout<attribute_set_t>.size, as: Int64.self)
+            return raw.loadUnaligned(fromByteOffset: offset, as: Int64.self)
         }
     }
 

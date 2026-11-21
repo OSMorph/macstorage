@@ -53,6 +53,9 @@ final class FileSizesTests: XCTestCase {
         let held = try XCTUnwrap(FolderAttribution.entry("big.bin", in: sub.path, owners: owners, options))
         XCTAssertEqual(held.owners.map(\.ownerID), ["logs"], "inside an owner's folder, the owner claims it")
         XCTAssertEqual(held.owners.first?.bytes, held.bytes)
+        let broad = Owner(id: "broad", name: "Broad", kind: .apps, location: "", items: [Rules.item(Fact(.appCache, onDisk: .bytes(1 << 30), targets: [], path: dir.path))])
+        let nested = try XCTUnwrap(FolderAttribution.entry("big.bin", in: sub.path, owners: [broad] + owners, options))
+        XCTAssertEqual(nested.owners.map(\.ownerID), ["logs"], "the closest folder's owner, not the biggest")
         let file = try XCTUnwrap(FolderAttribution.entry("notes.txt", in: dir.path, owners: owners, options))
         XCTAssertEqual(file.isFolder, false, "a file can't be opened")
         XCTAssertEqual(file.kind, .personalFiles)
@@ -578,16 +581,18 @@ final class FolderMeasurementsTests: XCTestCase {
             self.listDelay = listDelay
         }
 
-        @MainActor func measurements(home: String) -> FolderMeasurements {
+        var unlistable = false
+
+        @MainActor func measurements(home: String, flush: Duration = .milliseconds(20)) -> FolderMeasurements {
             FolderMeasurements(home: home, list: { folder in
                 self.lock.withLock { self.reads.append(folder) }
                 Thread.sleep(forTimeInterval: self.listDelay)
-                return self.names
+                return self.unlistable ? nil : self.names
             }, measure: { name, _, _, options in
                 let end = Date().addingTimeInterval(self.delay)
                 while Date() < end { if options.stop?.isStopped == true { return nil }; Thread.sleep(forTimeInterval: 0.001) }
                 return FolderEntry(name: name, bytes: 1_000, kind: .personalFiles, isFolder: false)
-            }, flushInterval: .milliseconds(20))
+            }, flushInterval: flush)
         }
     }
 
@@ -657,6 +662,27 @@ final class FolderMeasurementsTests: XCTestCase {
         func e(_ n: String, _ b: Int64?) -> FolderEntry { FolderEntry(name: n, bytes: b, kind: .apps) }
         let merged = FolderMeasurements.merge([e("a", 9), e("b", 5), e("c", nil)], [e("d", 7), e("e", 1)])
         XCTAssertEqual(merged.map(\.name), ["a", "d", "b", "e", "c"])
+    }
+
+    @MainActor func testReturningWithinAFlushRecordsEachEntryOnce() async throws {
+        // The paused run's last batch arrives after the resumed run has started.
+        let m = Disk(names: names, delay: 0.02).measurements(home: home.path, flush: .milliseconds(300))
+        m.open("~/A", owners: [], protected: [])
+        try await Task.sleep(for: .milliseconds(100))
+        m.open("~/B", owners: [], protected: [])
+        m.open("~/A", owners: [], protected: [])
+        try await waitUntil { m.levels["~/A"]?.isMeasuring == false }
+        XCTAssertEqual(m.levels["~/A"]?.entries.map(\.name).sorted(), names.sorted())
+    }
+
+    @MainActor func testAFolderThatCantBeListedSaysSo() async throws {
+        let disk = Disk(names: names)
+        disk.unlistable = true
+        let m = disk.measurements(home: home.path)
+        m.open("~/A", owners: [], protected: [])
+        try await waitUntil { m.levels["~/A"]?.problem != nil }
+        XCTAssertEqual(m.levels["~/A"]?.problem, .unreadable)
+        XCTAssertNil(m.measuring)
     }
 
     @MainActor func testARefusedFolderIsNeverRead() async throws {

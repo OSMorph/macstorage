@@ -184,7 +184,8 @@ public enum FolderAttribution {
     /// swapped in during one entry's walk: same user, read only.)
     public static func refusal(_ path: String, home: String, protected: Set<String>) -> Refusal? {
         var st = stat(), homeStat = stat()
-        guard lstat(path, &st) == 0, st.st_mode & S_IFMT == S_IFDIR else { return .notAFolder }
+        guard lstat(path, &st) == 0 else { return errno == EACCES ? .unreadable : .notAFolder }
+        guard st.st_mode & S_IFMT == S_IFDIR else { return .notAFolder }
         guard path == home || path.hasPrefix(home + "/"), let real = FileSizes.realPath(path), let realHome = FileSizes.realPath(home),
               real == realHome + path.dropFirst(home.count) else { return .throughLink }
         guard stat(home, &homeStat) == 0, st.st_dev == homeStat.st_dev else { return .otherVolume }
@@ -202,16 +203,20 @@ public enum FolderAttribution {
     public static func entry(_ name: String, in path: String, owners: [Owner], _ options: WalkOptions) -> FolderEntry? {
         let full = path + "/" + name
         if options.excluding.contains(full) { return FolderEntry(name: name, bytes: nil, kind: .personalFiles, isFolder: true) }
-        // A volume mounted here isn't part of this disk: left out, never walked.
         var st = stat(), parent = stat()
-        guard lstat(full, &st) == 0, lstat(path, &parent) == 0, st.st_dev == parent.st_dev else { return nil }
+        guard lstat(full, &st) == 0, lstat(path, &parent) == 0 else { return FolderEntry(name: name, bytes: 0, kind: .personalFiles, isPartial: true) }
+        // A volume mounted here isn't part of this disk: left out, never walked.
+        guard st.st_dev == parent.st_dev else { return nil }
         let size = FileSizes.measure(full, options)
         // Nothing that takes no space; one that couldn't be read is kept, as a lower bound.
         guard size.allocated > 0 || !size.isComplete else { return nil }
-        // An item that holds this entry (it's inside the item's folder) claims all of it;
-        // otherwise the items inside it claim their sizes.
-        let holder = owners.first { $0.items.contains { item in item.path.map { $0 != full && isInside(full, $0) } ?? false } }
-        let shares = holder.map { [OwnerShare(ownerID: $0.id, bytes: size.allocated)] } ?? owners.compactMap { o -> OwnerShare? in
+        // The item whose folder most closely holds this entry claims all of it; otherwise
+        // the items inside it claim their sizes.
+        let holders = owners.flatMap { o in o.items.compactMap { item in
+            item.path.flatMap { $0 != full && isInside(full, $0) ? (owner: o.id, path: $0) : nil }
+        } }
+        let holder = holders.max { $0.path.count < $1.path.count }
+        let shares = holder.map { [OwnerShare(ownerID: $0.owner, bytes: size.allocated)] } ?? owners.compactMap { o -> OwnerShare? in
             let bytes = o.items.filter { isInside($0.path, full) }.compactMap(\.onDisk.bytes).reduce(0, +)
             return bytes > 0 ? OwnerShare(ownerID: o.id, bytes: bytes) : nil
         }.sorted { $0.bytes > $1.bytes }

@@ -419,7 +419,7 @@ final class AppModel {
     func canOpen(_ entry: FolderEntry) -> Bool {
         let child = folderPath + "/" + entry.name
         if demo { return snapshot?.folders[child] != nil }
-        guard !entry.name.contains("/"), entry.name != "..", entry.name != "." else { return false }
+        guard snapshot?.isPartial == false, !entry.name.contains("/"), entry.name != "..", entry.name != "." else { return false }
         return isFolder(entry) && (entry.bytes != nil || fullDiskAccess)
     }
 

@@ -63,6 +63,7 @@ struct FoldersView: View {
                     }
                 }
                 .padding(16).frame(minWidth: 480)
+                .onChange(of: model.folderPath) { filter = "" }
                 FolderDetail(model: model, snapshot: s, folder: rows.first { $0.name == model.selectedFolder })
                     .frame(minWidth: 280, idealWidth: 320)
             }
@@ -156,7 +157,7 @@ struct FolderDetail: View {
                         if model.canOpen(f) { Button("Open") { model.openFolder(model.folderPath + "/" + f.name) } }
                     }
                     if model.demo, !model.canOpen(f), model.isFolder(f) {
-                        Text("The sample data only goes inside Library.").font(.caption).foregroundStyle(.secondary)
+                        Text("Sample data has no levels below this one.").font(.caption).foregroundStyle(.secondary)
                     }
                 } else if model.canOpen(f) {
                     // Protected when the scan ran; readable now that Full Disk Access is on.

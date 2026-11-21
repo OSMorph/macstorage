@@ -572,6 +572,16 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertEqual(result.coverage.first?.status, .failed)
     }
 
+    func testAMissingRootfulConnectionLeavesTheOverheadUnknown() async throws {
+        let (result, _) = try await podmanMachine([
+            { $0.contains("connection list") ? ToolOutput(status: 0, stdout: #"[{"Name":"dev","URI":"ssh://core@127.0.0.1:50000/run/user/501/podman/podman.sock","IsMachine":true}]"#) : nil },
+            { $0.hasPrefix("podman --connection dev system df") ? ToolOutput(status: 0, stdout: #"{"Type":"Images","TotalCount":1,"Active":0,"RawSize":1000,"RawReclaimable":1000}"#) : nil },
+        ], connectionsFirst: true)
+        let kinds = result.owners.first?.items.map(\.kind) ?? []
+        XCTAssertTrue(kinds.contains(.podmanUnusedImages))
+        XCTAssertFalse(kinds.contains(.dockerDiskSlack), "the rootful store may hold anything")
+    }
+
     func testOlderPodmanKeepsASameNamedDiskOfAnotherProvider() {
         let home = FileManager.default.temporaryDirectory.appending(path: "podman-home-\(UUID().uuidString)")
         let machine = home.appending(path: ".local/share/containers/podman/machine")

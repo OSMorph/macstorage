@@ -60,7 +60,9 @@ public struct PodmanProvider: Provider {
             // "-root". Only connections to a machine on this Mac are asked: one with the
             // same name to another host, or a rootful one aliasing the rootless socket, isn't.
             var facts: [Fact] = [], contents: Int64 = 0, problems: [String] = [], asked = Set<String>(), askedNames: [String] = [], allSized = true
-            for (connection, rootful) in [(name, false), (name + "-root", true)] where connections[connection] != nil {
+            for (connection, rootful) in [(name, false), (name + "-root", true)] {
+                // Podman makes both connections; without one, that store's size is unknown.
+                guard connections[connection] != nil else { allSized = false; continue }
                 guard let uri = connections[connection].flatMap({ Self.machineURI($0, of: machine, rootful: rootful) }),
                       // A destination already measured, for this machine or another, isn't again.
                       seen.insert(Self.destination(uri)).inserted else {
